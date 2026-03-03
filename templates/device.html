@@ -1,0 +1,204 @@
+{% extends "base.html" %}
+{% block title %}{{ device.friendly_name or device.advertised_name or device.mac_address }} - Bluetooth Radar{% endblock %}
+
+{% block content %}
+<div class="breadcrumb">
+    <a href="/">Dashboard</a> &rsaquo; Device Detail
+</div>
+
+<div class="device-detail">
+    <div class="detail-header">
+        <h1 id="device-title">{{ device.friendly_name or device.advertised_name or device.mac_address }}</h1>
+        <span class="state-badge state-{{ device.state | lower }}">{{ device.state }}</span>
+    </div>
+
+    <div class="detail-grid">
+        <div class="detail-card">
+            <h3>Device Info</h3>
+            <div class="detail-row">
+                <span class="detail-label">MAC Address</span>
+                <span class="detail-value">{{ device.mac_address }}</span>
+            </div>
+            <div class="detail-row">
+                <span class="detail-label">Advertised Name</span>
+                <span class="detail-value">{{ device.advertised_name or '(none)' }}</span>
+            </div>
+            <div class="detail-row">
+                <span class="detail-label">Device Type</span>
+                <span class="detail-value">{{ device.device_type }}</span>
+            </div>
+            <div class="detail-row">
+                <span class="detail-label">Manufacturer</span>
+                <span class="detail-value">{{ device.manufacturer or '(unknown)' }}</span>
+            </div>
+            <div class="detail-row">
+                <span class="detail-label">Scan Type</span>
+                <span class="detail-value">{{ device.scan_type }}</span>
+            </div>
+            {% if device.ip_address %}
+            <div class="detail-row">
+                <span class="detail-label">IP Address</span>
+                <span class="detail-value">{{ device.ip_address }}</span>
+            </div>
+            {% endif %}
+            <div class="detail-row">
+                <span class="detail-label">Last RSSI</span>
+                <span class="detail-value">{{ device.last_rssi if device.last_rssi is not none else 'n/a' }}</span>
+            </div>
+            <div class="detail-row">
+                <span class="detail-label">First Seen</span>
+                <span class="detail-value" data-timestamp="{{ device.first_seen }}">{{ device.first_seen }}</span>
+            </div>
+            <div class="detail-row">
+                <span class="detail-label">Last Seen</span>
+                <span class="detail-value" data-timestamp="{{ device.last_seen }}">{{ device.last_seen }}</span>
+            </div>
+        </div>
+
+        <div class="detail-card">
+            <h3>Linked Devices</h3>
+            <div id="link-status" class="link-status" style="display:none;"></div>
+
+            {% if device.linked_to %}
+                {# This device is a secondary — show its primary #}
+                <p class="link-info">This device is linked to:</p>
+                <div class="link-row">
+                    <div class="link-member">
+                        <a href="/device/{{ link_group.primary.mac_address }}">
+                            {{ link_group.primary.friendly_name or link_group.primary.advertised_name or link_group.primary.mac_address }}
+                        </a>
+                        <span class="text-dim">{{ link_group.primary.mac_address }}</span>
+                        <span class="scan-type-badge scan-type-{{ link_group.primary.scan_type|lower|replace('+', '-') }}">{{ link_group.primary.scan_type }}</span>
+                        <span class="state-badge state-{{ link_group.primary.state|lower }}">{{ link_group.primary.state }}</span>
+                    </div>
+                    <button class="btn btn-sm btn-unlink" onclick="unlinkDevice('{{ device.mac_address }}')">Unlink</button>
+                </div>
+            {% else %}
+                {# This device is a primary (or standalone) — show secondaries #}
+                {% if link_group.secondaries %}
+                    <p class="link-info">Linked devices:</p>
+                    {% for sec in link_group.secondaries %}
+                    <div class="link-row">
+                        <div class="link-member">
+                            <a href="/device/{{ sec.mac_address }}">
+                                {{ sec.friendly_name or sec.advertised_name or sec.mac_address }}
+                            </a>
+                            <span class="text-dim">{{ sec.mac_address }}</span>
+                            <span class="scan-type-badge scan-type-{{ sec.scan_type|lower|replace('+', '-') }}">{{ sec.scan_type }}</span>
+                            <span class="state-badge state-{{ sec.state|lower }}">{{ sec.state }}</span>
+                        </div>
+                        <button class="btn btn-sm btn-unlink" onclick="unlinkDevice('{{ sec.mac_address }}')">Unlink</button>
+                    </div>
+                    {% endfor %}
+                {% else %}
+                    <p class="text-dim" style="font-size:0.85rem; margin-bottom:0.75rem;">No linked devices.</p>
+                {% endif %}
+
+                {# Searchable dropdown to add a link #}
+                {% if linkable %}
+                <div class="link-add">
+                    <div class="link-search-wrap">
+                        <input type="text" id="link-search" class="link-search-input"
+                               placeholder="Search devices to link..." autocomplete="off">
+                        <input type="hidden" id="link-target" value="">
+                        <div id="link-dropdown" class="link-dropdown"></div>
+                    </div>
+                    <button class="btn btn-primary btn-sm" onclick="linkDevice('{{ device.mac_address }}')">Link</button>
+                </div>
+                {% endif %}
+            {% endif %}
+        </div>
+
+        <div class="detail-card">
+            <h3>Settings</h3>
+            <form id="device-form" class="device-form">
+                <div class="form-group">
+                    <label for="friendly-name">Friendly Name</label>
+                    <input type="text" id="friendly-name" value="{{ device.friendly_name or '' }}"
+                           placeholder="e.g. Richard's Phone">
+                </div>
+                <div class="form-group">
+                    <label for="device-type">Device Type</label>
+                    <div class="type-input-row">
+                        <select id="device-type">
+                            {% for t in ['Unknown','Phone','Tablet','Watch','Laptop','Desktop','Printer','Speaker','Headphones','TV','Gaming Console','IoT','Beacon','Other'] %}
+                            <option value="{{ t }}" {% if device.device_type == t %}selected{% endif %}>{{ t }}</option>
+                            {% endfor %}
+                            {% for t in custom_types %}
+                            <option value="{{ t }}" {% if device.device_type == t %}selected{% endif %}>{{ t }}</option>
+                            {% endfor %}
+                            <option value="__custom__">+ Add custom...</option>
+                        </select>
+                        <input type="text" id="device-type-custom" class="type-custom-input"
+                               placeholder="Enter custom type..." style="display:none;">
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label class="checkbox-label">
+                        <input type="checkbox" id="is-watchlisted"
+                               {% if device.is_watchlisted %}checked{% endif %}>
+                        Watchlisted
+                    </label>
+                </div>
+                <div class="form-group">
+                    <label class="checkbox-label">
+                        <input type="checkbox" id="is-notify"
+                               {% if device.is_notify %}checked{% endif %}>
+                        Notify (send ntfy notifications on arrival/departure)
+                    </label>
+                </div>
+                <div class="form-group">
+                    <label class="checkbox-label">
+                        <input type="checkbox" id="is-hidden"
+                               {% if device.is_hidden %}checked{% endif %}>
+                        Hidden (hide from dashboard)
+                    </label>
+                </div>
+                <button type="submit" class="btn btn-primary">Save</button>
+                <span id="save-status" class="save-status"></span>
+            </form>
+        </div>
+    </div>
+
+    <div class="section">
+        <h3>Recent Events</h3>
+        <table class="event-table">
+            <thead>
+                <tr>
+                    <th>Event</th>
+                    <th>Time</th>
+                    <th>RSSI</th>
+                </tr>
+            </thead>
+            <tbody id="device-events">
+                {% for event in events %}
+                <tr>
+                    <td>
+                        <span class="event-badge event-{{ event.event_type }}">
+                            {{ event.event_type }}
+                        </span>
+                    </td>
+                    <td data-timestamp="{{ event.timestamp }}">{{ event.timestamp }}</td>
+                    <td>{{ event.rssi if event.rssi is not none else 'n/a' }}</td>
+                </tr>
+                {% else %}
+                <tr><td colspan="3" class="empty">No events yet</td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    initDevicePage("{{ device.mac_address }}");
+    {% if linkable %}
+    initLinkSearch([
+        {% for d in linkable %}
+        { mac: "{{ d.mac_address }}", label: "{{ (d.friendly_name or d.advertised_name or d.mac_address)|e }} ({{ d.scan_type }})" },
+        {% endfor %}
+    ]);
+    {% endif %}
+</script>
+{% endblock %}

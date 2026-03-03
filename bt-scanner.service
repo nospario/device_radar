@@ -1,0 +1,15 @@
+[Unit]
+Description=Bluetooth Radar Scanner
+After=bluetooth.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/bt-monitor/bt_scanner.py
+WorkingDirectory=/opt/bt-monitor
+Restart=on-failure
+RestartSec=10
+User=root
+
+[Install]
+WantedBy=multi-user.target

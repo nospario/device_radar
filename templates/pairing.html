@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block title %}Pairing - Bluetooth Radar{% endblock %}
+
+{% block content %}
+<div class="section">
+    <div class="section-header">
+        <h2>Bluetooth Pairing</h2>
+        <div class="filters">
+            <label class="checkbox-label">
+                <input type="checkbox" id="filter-watchlisted"> Watchlisted only
+            </label>
+        </div>
+    </div>
+    <div class="pairing-note">
+        Pairing with a phone ensures it uses its real MAC address, making presence tracking reliable.
+        When you click "Pair", confirm the pairing prompt on your phone/device.
+    </div>
+    <div id="pair-status" class="pair-status" style="display:none;"></div>
+    <div class="table-wrap">
+        <table class="device-table">
+            <thead>
+                <tr>
+                    <th>Name</th>
+                    <th>MAC Address</th>
+                    <th>Type</th>
+                    <th>Paired</th>
+                    <th>Action</th>
+                </tr>
+            </thead>
+            <tbody id="pairing-tbody">
+                <tr><td colspan="5" class="loading">Loading...</td></tr>
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    initPairing();
+</script>
+{% endblock %}

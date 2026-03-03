@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}Bluetooth Radar{% endblock %}</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <nav class="navbar">
+        <a href="/" class="nav-brand">Bluetooth Radar</a>
+        <div class="nav-links">
+            <a href="/" class="{% if active == 'dashboard' %}active{% endif %}">Dashboard</a>
+            <a href="/history" class="{% if active == 'history' %}active{% endif %}">History</a>
+            <a href="/pairing" class="{% if active == 'pairing' %}active{% endif %}">Pairing</a>
+        </div>
+    </nav>
+    <main class="container">
+        {% block content %}{% endblock %}
+    </main>
+    <script src="/static/app.js"></script>
+    {% block scripts %}{% endblock %}
+</body>
+</html>

@@ -1,0 +1,111 @@
+{% extends "base.html" %}
+{% block title %}Dashboard - Bluetooth Radar{% endblock %}
+
+{% block content %}
+<div class="stats-row" id="stats-row">
+    <div class="stat-card">
+        <div class="stat-value" id="stat-total">--</div>
+        <div class="stat-label">Total Devices</div>
+    </div>
+    <div class="stat-card stat-home">
+        <div class="stat-value" id="stat-home">--</div>
+        <div class="stat-label">Home</div>
+    </div>
+    <div class="stat-card stat-away">
+        <div class="stat-value" id="stat-away">--</div>
+        <div class="stat-label">Away</div>
+    </div>
+    <div class="stat-card stat-watch">
+        <div class="stat-value" id="stat-watchlisted">--</div>
+        <div class="stat-label">Watchlisted</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-value" id="stat-events">--</div>
+        <div class="stat-label">Events Today</div>
+    </div>
+</div>
+
+<div class="section">
+    <div class="section-header">
+        <h2>All Devices</h2>
+        <div class="filters">
+            <label class="checkbox-label">
+                <input type="checkbox" id="filter-hidden"> Show hidden
+            </label>
+            <button class="btn btn-sm" id="btn-reset-filters" onclick="resetFilters()">Reset filters</button>
+        </div>
+    </div>
+    <div class="table-wrap">
+        <table class="device-table" id="device-table">
+            <thead>
+                <tr>
+                    <th>State</th>
+                    <th>Name</th>
+                    <th>MAC Address</th>
+                    <th>Type</th>
+                    <th>Scan</th>
+                    <th>Manufacturer</th>
+                    <th>RSSI</th>
+                    <th>Last Seen</th>
+                    <th>Paired</th>
+                    <th>Notify</th>
+                    <th>Watchlist</th>
+                </tr>
+                <tr class="filter-row">
+                    <th>
+                        <select id="col-filter-state" class="col-filter">
+                            <option value="">All</option>
+                            <option value="HOME">Home</option>
+                            <option value="AWAY">Away</option>
+                        </select>
+                    </th>
+                    <th><input type="text" id="col-filter-name" class="col-filter" placeholder="Filter..."></th>
+                    <th><input type="text" id="col-filter-mac" class="col-filter" placeholder="Filter..."></th>
+                    <th><input type="text" id="col-filter-type" class="col-filter" placeholder="Filter..."></th>
+                    <th>
+                        <select id="col-filter-scan" class="col-filter">
+                            <option value="">All</option>
+                            <option value="BLE">BLE</option>
+                            <option value="Classic">Classic</option>
+                            <option value="WiFi">WiFi</option>
+                        </select>
+                    </th>
+                    <th></th>
+                    <th></th>
+                    <th></th>
+                    <th>
+                        <select id="col-filter-paired" class="col-filter">
+                            <option value="">All</option>
+                            <option value="yes">Yes</option>
+                            <option value="no">No</option>
+                        </select>
+                    </th>
+                    <th>
+                        <select id="col-filter-notify" class="col-filter">
+                            <option value="">All</option>
+                            <option value="on">On</option>
+                            <option value="off">Off</option>
+                        </select>
+                    </th>
+                    <th>
+                        <select id="col-filter-watchlist" class="col-filter">
+                            <option value="">All</option>
+                            <option value="yes">Yes</option>
+                            <option value="no">No</option>
+                        </select>
+                    </th>
+                </tr>
+            </thead>
+            <tbody id="device-tbody">
+                <tr><td colspan="11" class="loading">Loading...</td></tr>
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    initDashboard();
+</script>
+{% endblock %}

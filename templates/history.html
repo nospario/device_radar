@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block title %}Event History - Bluetooth Radar{% endblock %}
+
+{% block content %}
+<h2>Event History</h2>
+
+<div class="filters history-filters">
+    <select id="filter-event-type">
+        <option value="">All Events</option>
+        <option value="arrived">Arrivals</option>
+        <option value="departed">Departures</option>
+    </select>
+    <input type="text" id="filter-mac" placeholder="Filter by MAC...">
+    <button class="btn btn-secondary" id="btn-apply-filter">Apply</button>
+</div>
+
+<table class="event-table" id="history-table">
+    <thead>
+        <tr>
+            <th>Event</th>
+            <th>Device</th>
+            <th>MAC Address</th>
+            <th>Type</th>
+            <th>RSSI</th>
+            <th>Time</th>
+        </tr>
+    </thead>
+    <tbody id="history-tbody">
+        <tr><td colspan="6" class="loading">Loading...</td></tr>
+    </tbody>
+</table>
+
+<div class="pagination" id="pagination">
+    <button class="btn btn-secondary" id="btn-prev" disabled>Previous</button>
+    <span id="page-info">Page 1</span>
+    <button class="btn btn-secondary" id="btn-next">Next</button>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    initHistory();
+</script>
+{% endblock %}

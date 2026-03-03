@@ -1,0 +1,547 @@
+"""Shared SQLite database module for Bluetooth Radar.
+
+Provides the schema, connection helpers, and query functions used by both
+the scanner and the web dashboard.
+"""
+
+from __future__ import annotations
+
+import json
+import sqlite3
+import time
+from pathlib import Path
+from typing import Any
+
+DEFAULT_DB_PATH = Path(__file__).resolve().parent / "bt_radar.db"
+
+
+def get_connection(db_path: str | Path = DEFAULT_DB_PATH) -> sqlite3.Connection:
+    """Open a SQLite connection with WAL mode and busy timeout."""
+    conn = sqlite3.connect(str(db_path), timeout=5)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=5000")
+    conn.execute("PRAGMA foreign_keys=ON")
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _add_column(conn: sqlite3.Connection, table: str, column: str, coltype: str) -> None:
+    """Add a column to a table if it doesn't already exist."""
+    try:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}")
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass
+
+
+def _run_migration(conn: sqlite3.Connection, name: str, sql: str) -> None:
+    """Run a SQL statement once, tracked by name in the migrations table."""
+    if conn.execute("SELECT 1 FROM migrations WHERE name = ?", (name,)).fetchone():
+        return
+    conn.execute(sql)
+    conn.execute("INSERT INTO migrations (name) VALUES (?)", (name,))
+
+
+def init_db(db_path: str | Path = DEFAULT_DB_PATH) -> None:
+    """Create tables if they don't exist."""
+    conn = get_connection(db_path)
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS devices (
+            mac_address       TEXT PRIMARY KEY,
+            advertised_name   TEXT,
+            friendly_name     TEXT,
+            device_type       TEXT DEFAULT 'Unknown',
+            manufacturer      TEXT,
+            scan_type         TEXT DEFAULT 'BLE',
+            last_rssi         INTEGER,
+            is_watchlisted    INTEGER DEFAULT 0,
+            is_hidden         INTEGER DEFAULT 0,
+            is_paired         INTEGER DEFAULT 0,
+            is_notify         INTEGER DEFAULT 0,
+            first_seen        REAL,
+            last_seen         REAL,
+            state             TEXT DEFAULT 'AWAY',
+            manufacturer_data TEXT,
+            service_uuids     TEXT,
+            ip_address        TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS events (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            mac_address   TEXT NOT NULL,
+            event_type    TEXT NOT NULL,
+            timestamp     REAL NOT NULL,
+            device_name   TEXT,
+            device_type   TEXT,
+            rssi          INTEGER,
+            FOREIGN KEY (mac_address) REFERENCES devices(mac_address)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_events_mac ON events(mac_address);
+        CREATE INDEX IF NOT EXISTS idx_events_ts ON events(timestamp DESC);
+        CREATE INDEX IF NOT EXISTS idx_devices_state ON devices(state);
+        CREATE INDEX IF NOT EXISTS idx_devices_watchlisted ON devices(is_watchlisted);
+    """)
+    # Migrations for databases created before these columns existed
+    _add_column(conn, "devices", "is_paired", "INTEGER DEFAULT 0")
+    _add_column(conn, "devices", "is_notify", "INTEGER DEFAULT 0")
+    _add_column(conn, "devices", "ip_address", "TEXT")
+    _add_column(conn, "devices", "linked_to", "TEXT")
+
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_devices_linked_to ON devices(linked_to)")
+
+    # One-time data migrations (tracked so they never re-run)
+    conn.execute("CREATE TABLE IF NOT EXISTS migrations (name TEXT PRIMARY KEY)")
+    _run_migration(conn, "watchlisted_notify_backfill",
+                   "UPDATE devices SET is_notify = 1 WHERE is_watchlisted = 1 AND is_notify = 0")
+    conn.commit()
+
+    conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Device operations
+# ---------------------------------------------------------------------------
+
+def upsert_device(
+    conn: sqlite3.Connection,
+    mac: str,
+    *,
+    advertised_name: str | None = None,
+    device_type: str | None = None,
+    manufacturer: str | None = None,
+    scan_type: str = "BLE",
+    rssi: int | None = None,
+    state: str | None = None,
+    manufacturer_data: dict | None = None,
+    service_uuids: list[str] | None = None,
+    ip_address: str | None = None,
+) -> None:
+    """Insert or update a device record."""
+    now = time.time()
+    mfr_json = json.dumps(manufacturer_data) if manufacturer_data else None
+    uuid_json = json.dumps(service_uuids) if service_uuids else None
+
+    conn.execute("""
+        INSERT INTO devices (
+            mac_address, advertised_name, device_type, manufacturer,
+            scan_type, last_rssi, first_seen, last_seen, state,
+            manufacturer_data, service_uuids, ip_address
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(mac_address) DO UPDATE SET
+            advertised_name   = COALESCE(excluded.advertised_name, devices.advertised_name),
+            device_type       = CASE WHEN devices.device_type = 'Unknown'
+                                          AND excluded.device_type IS NOT NULL
+                                          AND excluded.device_type != 'Unknown'
+                                     THEN excluded.device_type ELSE devices.device_type END,
+            manufacturer      = COALESCE(excluded.manufacturer, devices.manufacturer),
+            scan_type         = CASE
+                                    WHEN devices.scan_type = excluded.scan_type THEN devices.scan_type
+                                    WHEN devices.scan_type LIKE '%' || excluded.scan_type || '%' THEN devices.scan_type
+                                    WHEN excluded.scan_type LIKE '%' || devices.scan_type || '%' THEN excluded.scan_type
+                                    ELSE devices.scan_type || ', ' || excluded.scan_type
+                                END,
+            last_rssi         = COALESCE(excluded.last_rssi, devices.last_rssi),
+            last_seen         = excluded.last_seen,
+            state             = COALESCE(excluded.state, devices.state),
+            manufacturer_data = COALESCE(excluded.manufacturer_data, devices.manufacturer_data),
+            service_uuids     = COALESCE(excluded.service_uuids, devices.service_uuids),
+            ip_address        = COALESCE(excluded.ip_address, devices.ip_address)
+    """, (
+        mac.upper(), advertised_name, device_type, manufacturer,
+        scan_type, rssi, now, now, state or "HOME",
+        mfr_json, uuid_json, ip_address,
+    ))
+    conn.commit()
+
+
+def get_device(conn: sqlite3.Connection, mac: str) -> dict[str, Any] | None:
+    """Fetch a single device by MAC address."""
+    row = conn.execute(
+        "SELECT * FROM devices WHERE mac_address = ?", (mac.upper(),)
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def get_all_devices(
+    conn: sqlite3.Connection,
+    *,
+    include_hidden: bool = False,
+    state: str | None = None,
+    watchlisted_only: bool = False,
+    scan_type: str | None = None,
+) -> list[dict[str, Any]]:
+    """Fetch devices with optional filters."""
+    clauses: list[str] = []
+    params: list[Any] = []
+
+    if not include_hidden:
+        clauses.append("is_hidden = 0")
+    if state:
+        clauses.append("state = ?")
+        params.append(state)
+    if watchlisted_only:
+        clauses.append("is_watchlisted = 1")
+    if scan_type:
+        clauses.append("scan_type LIKE ?")
+        params.append(f"%{scan_type}%")
+
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    rows = conn.execute(
+        f"SELECT * FROM devices {where} ORDER BY last_seen DESC", params
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def update_device(
+    conn: sqlite3.Connection,
+    mac: str,
+    *,
+    friendly_name: str | None = None,
+    device_type: str | None = None,
+    is_watchlisted: bool | None = None,
+    is_hidden: bool | None = None,
+    is_paired: bool | None = None,
+    is_notify: bool | None = None,
+    state: str | None = None,
+    last_seen: float | None = None,
+) -> bool:
+    """Update specific fields on a device. Returns True if a row was updated."""
+    sets: list[str] = []
+    params: list[Any] = []
+
+    if friendly_name is not None:
+        sets.append("friendly_name = ?")
+        params.append(friendly_name)
+    if device_type is not None:
+        sets.append("device_type = ?")
+        params.append(device_type)
+    if is_watchlisted is not None:
+        sets.append("is_watchlisted = ?")
+        params.append(int(is_watchlisted))
+    if is_hidden is not None:
+        sets.append("is_hidden = ?")
+        params.append(int(is_hidden))
+    if is_paired is not None:
+        sets.append("is_paired = ?")
+        params.append(int(is_paired))
+    if is_notify is not None:
+        sets.append("is_notify = ?")
+        params.append(int(is_notify))
+    if state is not None:
+        sets.append("state = ?")
+        params.append(state)
+    if last_seen is not None:
+        sets.append("last_seen = ?")
+        params.append(last_seen)
+
+    if not sets:
+        return False
+
+    params.append(mac.upper())
+    cur = conn.execute(
+        f"UPDATE devices SET {', '.join(sets)} WHERE mac_address = ?", params
+    )
+    conn.commit()
+    return cur.rowcount > 0
+
+
+# ---------------------------------------------------------------------------
+# Device linking
+# ---------------------------------------------------------------------------
+
+def link_device(conn: sqlite3.Connection, secondary_mac: str, primary_mac: str) -> bool:
+    """Link a secondary device to a primary device.
+
+    Resolves chains: if the target is itself a secondary, resolves to the root.
+    Re-points any existing dependents of the secondary to the resolved primary.
+    Returns True if the link was created.
+    """
+    secondary_mac = secondary_mac.upper()
+    primary_mac = primary_mac.upper()
+
+    if secondary_mac == primary_mac:
+        return False
+
+    # Resolve the target to the root primary (follow linked_to chain)
+    root = primary_mac
+    seen: set[str] = {root}
+    while True:
+        row = conn.execute(
+            "SELECT linked_to FROM devices WHERE mac_address = ?", (root,)
+        ).fetchone()
+        if not row or not row["linked_to"]:
+            break
+        root = row["linked_to"]
+        if root in seen:
+            break  # cycle guard
+        seen.add(root)
+
+    if secondary_mac == root:
+        return False  # would create a self-link
+
+    # Re-point any devices currently linked to secondary_mac to the root
+    conn.execute(
+        "UPDATE devices SET linked_to = ? WHERE linked_to = ?",
+        (root, secondary_mac),
+    )
+    # Set the secondary's linked_to
+    conn.execute(
+        "UPDATE devices SET linked_to = ? WHERE mac_address = ?",
+        (root, secondary_mac),
+    )
+    conn.commit()
+    return True
+
+
+def unlink_device(conn: sqlite3.Connection, mac: str) -> bool:
+    """Remove the link for a device (set linked_to = NULL).
+
+    Returns True if the device was updated.
+    """
+    mac = mac.upper()
+    cur = conn.execute(
+        "UPDATE devices SET linked_to = NULL WHERE mac_address = ? AND linked_to IS NOT NULL",
+        (mac,),
+    )
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def get_link_group(conn: sqlite3.Connection, mac: str) -> dict[str, Any]:
+    """Return the link group for a given MAC.
+
+    Returns dict with:
+      - primary: the primary device dict
+      - secondaries: list of secondary device dicts
+    """
+    mac = mac.upper()
+    dev = get_device(conn, mac)
+    if not dev:
+        return {"primary": None, "secondaries": []}
+
+    # Find the primary (root)
+    primary_mac = mac
+    if dev["linked_to"]:
+        primary_mac = dev["linked_to"]
+
+    primary = get_device(conn, primary_mac)
+    if not primary:
+        primary = dev
+        primary_mac = mac
+
+    # Find all secondaries
+    rows = conn.execute(
+        "SELECT * FROM devices WHERE linked_to = ?", (primary_mac,)
+    ).fetchall()
+    secondaries = [dict(r) for r in rows]
+
+    return {"primary": primary, "secondaries": secondaries}
+
+
+def get_all_devices_merged(
+    conn: sqlite3.Connection,
+    *,
+    include_hidden: bool = False,
+    state: str | None = None,
+    watchlisted_only: bool = False,
+    scan_type: str | None = None,
+) -> list[dict[str, Any]]:
+    """Like get_all_devices but merges linked secondaries into their primary.
+
+    Each primary row gets:
+      - state = HOME if any member is HOME
+      - last_seen = max across group
+      - scan_type = joined unique types (e.g. "BLE, WiFi")
+      - linked_devices = list of secondary device dicts
+    Secondary devices are excluded from the top-level list.
+    """
+    all_devs = get_all_devices(
+        conn, include_hidden=include_hidden,
+        state=None,  # fetch all states, filter after merging
+        watchlisted_only=watchlisted_only,
+        scan_type=None,  # filter after merging
+    )
+
+    # Index by MAC
+    by_mac: dict[str, dict[str, Any]] = {d["mac_address"]: d for d in all_devs}
+
+    # Group secondaries under their primary
+    primaries: dict[str, list[dict[str, Any]]] = {}  # primary_mac -> [secondaries]
+    secondary_macs: set[str] = set()
+
+    for d in all_devs:
+        linked = d.get("linked_to")
+        if linked and linked in by_mac:
+            secondary_macs.add(d["mac_address"])
+            primaries.setdefault(linked, []).append(d)
+
+    # Build the merged list
+    result: list[dict[str, Any]] = []
+    for d in all_devs:
+        mac = d["mac_address"]
+        if mac in secondary_macs:
+            continue  # skip secondaries
+
+        merged = dict(d)
+        secs = primaries.get(mac, [])
+        merged["linked_devices"] = secs
+
+        if secs:
+            # Merge state: HOME if any member is HOME
+            all_members = [d] + secs
+            if any(m["state"] == "HOME" for m in all_members):
+                merged["state"] = "HOME"
+
+            # Merge last_seen: max across group
+            last_seens = [m["last_seen"] for m in all_members if m["last_seen"]]
+            if last_seens:
+                merged["last_seen"] = max(last_seens)
+
+            # Merge scan_type: join unique types
+            scan_types: list[str] = []
+            for m in all_members:
+                if m["scan_type"]:
+                    for st in m["scan_type"].split(", "):
+                        st = st.strip()
+                        if st and st not in scan_types:
+                            scan_types.append(st)
+            merged["scan_type"] = ", ".join(scan_types) if scan_types else d["scan_type"]
+
+        # Apply filters that couldn't be applied pre-merge
+        if state and merged["state"] != state:
+            continue
+        if scan_type and scan_type not in (merged.get("scan_type") or ""):
+            continue
+
+        result.append(merged)
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Event operations
+# ---------------------------------------------------------------------------
+
+def record_event(
+    conn: sqlite3.Connection,
+    mac: str,
+    event_type: str,
+    *,
+    device_name: str | None = None,
+    device_type: str | None = None,
+    rssi: int | None = None,
+) -> None:
+    """Insert an arrival or departure event."""
+    conn.execute("""
+        INSERT INTO events (mac_address, event_type, timestamp, device_name, device_type, rssi)
+        VALUES (?, ?, ?, ?, ?, ?)
+    """, (mac.upper(), event_type, time.time(), device_name, device_type, rssi))
+    conn.commit()
+
+
+def get_events(
+    conn: sqlite3.Connection,
+    *,
+    mac: str | None = None,
+    event_type: str | None = None,
+    limit: int = 100,
+    offset: int = 0,
+) -> list[dict[str, Any]]:
+    """Fetch events with optional filters, newest first."""
+    clauses: list[str] = []
+    params: list[Any] = []
+
+    if mac:
+        clauses.append("e.mac_address = ?")
+        params.append(mac.upper())
+    if event_type:
+        clauses.append("e.event_type = ?")
+        params.append(event_type)
+
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    params.extend([limit, offset])
+
+    rows = conn.execute(f"""
+        SELECT e.*, d.friendly_name, d.advertised_name as d_adv_name
+        FROM events e
+        LEFT JOIN devices d ON e.mac_address = d.mac_address
+        {where}
+        ORDER BY e.timestamp DESC
+        LIMIT ? OFFSET ?
+    """, params).fetchall()
+    return [dict(r) for r in rows]
+
+
+def count_events(
+    conn: sqlite3.Connection,
+    *,
+    mac: str | None = None,
+    event_type: str | None = None,
+) -> int:
+    """Count events with optional filters."""
+    clauses: list[str] = []
+    params: list[Any] = []
+
+    if mac:
+        clauses.append("mac_address = ?")
+        params.append(mac.upper())
+    if event_type:
+        clauses.append("event_type = ?")
+        params.append(event_type)
+
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    row = conn.execute(
+        f"SELECT COUNT(*) as cnt FROM events {where}", params
+    ).fetchone()
+    return row["cnt"]
+
+
+# ---------------------------------------------------------------------------
+# Stats
+# ---------------------------------------------------------------------------
+
+def get_stats(conn: sqlite3.Connection) -> dict[str, Any]:
+    """Return summary statistics for the dashboard (excludes linked secondaries)."""
+    total = conn.execute(
+        "SELECT COUNT(*) as c FROM devices WHERE is_hidden = 0 AND linked_to IS NULL"
+    ).fetchone()["c"]
+    home = conn.execute(
+        "SELECT COUNT(*) as c FROM devices WHERE state = 'HOME' AND is_hidden = 0 AND linked_to IS NULL"
+    ).fetchone()["c"]
+    watchlisted = conn.execute(
+        "SELECT COUNT(*) as c FROM devices WHERE is_watchlisted = 1 AND linked_to IS NULL"
+    ).fetchone()["c"]
+    events_today_start = time.time() - (time.time() % 86400)  # midnight UTC approx
+    events_today = conn.execute(
+        "SELECT COUNT(*) as c FROM events WHERE timestamp >= ?", (events_today_start,)
+    ).fetchone()["c"]
+    return {
+        "total_devices": total,
+        "home_devices": home,
+        "away_devices": total - home,
+        "watchlisted_devices": watchlisted,
+        "events_today": events_today,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Cleanup
+# ---------------------------------------------------------------------------
+
+def hide_stale_random_macs(conn: sqlite3.Connection, hours: int = 24) -> int:
+    """Hide devices with random MACs not seen in the given hours.
+
+    A random MAC has the locally administered bit set (second hex digit
+    is one of 2, 3, 6, 7, A, B, E, F).
+    """
+    cutoff = time.time() - (hours * 3600)
+    cur = conn.execute("""
+        UPDATE devices SET is_hidden = 1
+        WHERE is_hidden = 0
+          AND is_watchlisted = 0
+          AND last_seen < ?
+          AND SUBSTR(mac_address, 2, 1) IN ('2','3','6','7','A','B','E','F','a','b','e','f')
+    """, (cutoff,))
+    conn.commit()
+    return cur.rowcount
