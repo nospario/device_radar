@@ -39,8 +39,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "cleanup_stale_hours": 24,
     "devices": {},
     "wifi_scan_enabled": False,
-    "wifi_scan_interval_cycles": 4,
-    "wifi_departure_threshold_seconds": 600,
+    "wifi_scan_interval_cycles": 1,
+    "wifi_departure_threshold_seconds": 90,
     "wifi_interface": "wlan0",
     "wifi_subnet": None,
 }
@@ -88,7 +88,7 @@ def migrate_config_devices(config: dict[str, Any], db_path: str | Path) -> None:
                 conn, mac,
                 advertised_name=name,
                 device_type="Phone",
-                state="AWAY",
+                state="LOST",
             )
             bt_db.update_device(conn, mac, friendly_name=name, is_watchlisted=True, is_notify=True)
             migrated += 1
@@ -246,6 +246,33 @@ class BluetoothRadarScanner:
         except Exception:
             logger.error("Failed to send ntfy notification for '%s'", title, exc_info=True)
 
+    async def notify_new_wifi(
+        self, name: str, mac: str, ip: str | None, vendor: str | None
+    ) -> None:
+        """Send a push notification for a brand-new WiFi device."""
+        url = f"{self.ntfy_server}/{self.ntfy_topic}"
+        title = f"New WiFi device: {name}"
+        details = [mac]
+        if ip:
+            details.append(ip)
+        if vendor:
+            details.append(vendor)
+        message = f"New device joined the network: {' — '.join(details)}"
+
+        headers = {
+            "Title": title,
+            "Priority": "high",
+            "Tags": "warning,new",
+        }
+
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.post(url, content=message, headers=headers, timeout=10)
+                resp.raise_for_status()
+            logger.info("Notification sent: %s", title)
+        except Exception:
+            logger.error("Failed to send new WiFi notification for '%s'", title, exc_info=True)
+
     # ------------------------------------------------------------------
     # Discovery mode
     # ------------------------------------------------------------------
@@ -356,7 +383,7 @@ class BluetoothRadarScanner:
                 manufacturer=info.manufacturer,
                 scan_type="BLE",
                 rssi=rssi,
-                state="HOME",
+                state="DETECTED",
                 manufacturer_data={str(k): list(v) for k, v in mfr_data.items()} if mfr_data else None,
                 service_uuids=svc_uuids,
             )
@@ -382,7 +409,7 @@ class BluetoothRadarScanner:
                     device_type=info.device_type,
                     manufacturer=info.manufacturer,
                     scan_type="Classic" if mac not in seen_macs else "BLE+Classic",
-                    state="HOME",
+                    state="DETECTED",
                 )
                 seen_macs.add(mac)
 
@@ -397,16 +424,20 @@ class BluetoothRadarScanner:
 
             for wd in wifi_results:
                 display_name = wd.hostname or wd.ip_address
+                is_new = bt_db.get_device(conn, wd.mac_address) is None
                 bt_db.upsert_device(
                     conn, wd.mac_address,
                     advertised_name=display_name,
                     device_type="Network Device",
                     manufacturer=wd.vendor,
                     scan_type="WiFi",
-                    state="HOME",
+                    state="DETECTED",
                     ip_address=wd.ip_address,
                 )
                 seen_macs.add(wd.mac_address)
+                if is_new:
+                    logger.info("New WiFi device detected: %s (%s)", display_name, wd.mac_address)
+                    await self.notify_new_wifi(display_name, wd.mac_address, wd.ip_address, wd.vendor)
 
         # -- State transitions --
         await self._check_arrivals(conn, seen_macs, prev_states)
@@ -440,7 +471,7 @@ class BluetoothRadarScanner:
         for mac in seen_macs:
             prev = prev_states.get(mac)
             # Only trigger arrival if device was previously AWAY or is brand new
-            if prev == "HOME":
+            if prev == "DETECTED":
                 continue
 
             dev = bt_db.get_device(conn, mac)
@@ -460,32 +491,36 @@ class BluetoothRadarScanner:
             )
             logger.info("%s arrived (RSSI %s)", dev_name, dev["last_rssi"])
 
-            if dev["is_notify"]:
-                # Group-aware notification: check if part of a link group
-                group = bt_db.get_link_group(conn, mac)
-                primary = group["primary"]
-                if primary and group["secondaries"]:
-                    primary_mac = primary["mac_address"]
-                    if primary_mac in notified_groups:
-                        continue  # already notified for this group
+            # Group-aware notification: check if part of a link group
+            group = bt_db.get_link_group(conn, mac)
+            primary = group["primary"]
+            if primary and group["secondaries"]:
+                primary_mac = primary["mac_address"]
+                if primary_mac in notified_groups:
+                    continue  # already notified for this group
 
-                    # Only consider notify-enabled members when deciding to suppress.
-                    # Non-notifying members (e.g. WiFi devices always HOME) should
-                    # not prevent notifications from firing.
-                    all_members = [primary] + group["secondaries"]
-                    other_was_home = any(
-                        prev_states.get(m["mac_address"]) == "HOME"
-                        for m in all_members
-                        if m["mac_address"] != mac and m.get("is_notify")
-                    )
-                    if other_was_home:
-                        continue  # group was already home, no notification
+                # Only consider notify-enabled members when deciding to suppress.
+                # Non-notifying members (e.g. WiFi devices always HOME) should
+                # not prevent notifications from firing.
+                all_members = [primary] + group["secondaries"]
+                other_was_home = any(
+                    prev_states.get(m["mac_address"]) == "DETECTED"
+                    for m in all_members
+                    if m["mac_address"] != mac and m.get("is_notify")
+                )
+                if other_was_home:
+                    continue  # group was already home, no notification
 
-                    notified_groups.add(primary_mac)
-                    notify_name = primary["friendly_name"] or primary["advertised_name"] or primary_mac
-                    await self.notify(notify_name, "arrived")
-                else:
-                    await self.notify(dev_name, "arrived")
+                # Check if any group member has notifications enabled
+                group_notify = any(m.get("is_notify") for m in all_members)
+                if not group_notify:
+                    continue
+
+                notified_groups.add(primary_mac)
+                notify_name = primary["friendly_name"] or primary["advertised_name"] or primary_mac
+                await self.notify(notify_name, "arrived")
+            elif dev["is_notify"]:
+                await self.notify(dev_name, "arrived")
 
     async def _check_departures(
         self, conn: sqlite3.Connection, seen_macs: set[str], now: float
@@ -499,21 +534,18 @@ class BluetoothRadarScanner:
         notified_groups: set[str] = set()  # primary MACs already notified
 
         # Get all HOME devices not seen this cycle
-        home_devices = bt_db.get_all_devices(conn, state="HOME", include_hidden=True)
+        home_devices = bt_db.get_all_devices(conn, state="DETECTED", include_hidden=True)
         for dev in home_devices:
             mac = dev["mac_address"]
             if mac in seen_macs:
                 continue
 
-            # Use longer departure threshold for WiFi devices
             threshold = self.departure_threshold
-            if dev.get("scan_type") == "WiFi":
-                threshold = self.wifi_departure_threshold
 
             # Check if departure threshold exceeded
             last_seen = dev["last_seen"] or 0
             if last_seen > 0 and (now - last_seen) > threshold:
-                bt_db.update_device(conn, mac, state="AWAY")
+                bt_db.update_device(conn, mac, state="LOST")
 
                 # Only record events and notify for watchlisted devices
                 if not dev["is_watchlisted"]:
@@ -528,33 +560,41 @@ class BluetoothRadarScanner:
                 )
                 logger.info("%s departed", dev_name)
 
-                if dev["is_notify"]:
-                    # Group-aware notification: only notify when ALL members departed
-                    group = bt_db.get_link_group(conn, mac)
-                    primary = group["primary"]
-                    if primary and group["secondaries"]:
-                        primary_mac = primary["mac_address"]
-                        if primary_mac in notified_groups:
-                            continue
+                # Group-aware notification: only notify when ALL members departed
+                group = bt_db.get_link_group(conn, mac)
+                primary = group["primary"]
+                if primary and group["secondaries"]:
+                    primary_mac = primary["mac_address"]
+                    if primary_mac in notified_groups:
+                        continue
 
-                        # Re-read all members to get current state after updates.
-                        # Only consider notify-enabled members — non-notifying
-                        # members (e.g. WiFi always HOME) shouldn't block departure.
-                        all_macs = [primary["mac_address"]] + [s["mac_address"] for s in group["secondaries"]]
-                        any_still_home = False
-                        for m_mac in all_macs:
-                            m_dev = bt_db.get_device(conn, m_mac)
-                            if m_dev and m_dev["state"] == "HOME" and m_dev.get("is_notify"):
-                                any_still_home = True
+                    # Re-read all members to get current state after updates.
+                    # Only send departure when ALL members are LOST.
+                    all_macs = [primary["mac_address"]] + [s["mac_address"] for s in group["secondaries"]]
+                    any_still_home = False
+                    for m_mac in all_macs:
+                        m_dev = bt_db.get_device(conn, m_mac)
+                        if m_dev and m_dev["state"] == "DETECTED":
+                            any_still_home = True
+                            break
+                    if any_still_home:
+                        continue  # at least one member still home
+
+                    # Check if any group member has notifications enabled
+                    group_notify = primary.get("is_notify")
+                    if not group_notify:
+                        for s in group["secondaries"]:
+                            if s.get("is_notify"):
+                                group_notify = True
                                 break
-                        if any_still_home:
-                            continue  # at least one member still home
+                    if not group_notify:
+                        continue
 
-                        notified_groups.add(primary_mac)
-                        notify_name = primary["friendly_name"] or primary["advertised_name"] or primary_mac
-                        await self.notify(notify_name, "departed")
-                    else:
-                        await self.notify(dev_name, "departed")
+                    notified_groups.add(primary_mac)
+                    notify_name = primary["friendly_name"] or primary["advertised_name"] or primary_mac
+                    await self.notify(notify_name, "departed")
+                elif dev["is_notify"]:
+                    await self.notify(dev_name, "departed")
 
     # ------------------------------------------------------------------
     # Main loop
