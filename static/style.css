@@ -92,8 +92,8 @@ a:hover { text-decoration: underline; }
     margin-top: 0.25rem;
 }
 
-.stat-home .stat-value { color: var(--green); }
-.stat-away .stat-value { color: var(--red); }
+.stat-detected .stat-value { color: var(--green); }
+.stat-lost .stat-value { color: var(--red); }
 .stat-watch .stat-value { color: var(--yellow); }
 
 /* Section */
@@ -206,12 +206,12 @@ tbody tr:hover { background: var(--bg-hover); }
     text-transform: uppercase;
 }
 
-.state-home, .event-arrived {
+.state-detected, .event-arrived {
     background: rgba(52, 199, 89, 0.15);
     color: var(--green);
 }
 
-.state-away, .event-departed {
+.state-lost, .event-departed {
     background: rgba(255, 69, 58, 0.15);
     color: var(--red);
 }

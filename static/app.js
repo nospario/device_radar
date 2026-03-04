@@ -42,8 +42,8 @@ async function loadStats() {
     try {
         const stats = await api('/api/stats');
         document.getElementById('stat-total').textContent = stats.total_devices;
-        document.getElementById('stat-home').textContent = stats.home_devices;
-        document.getElementById('stat-away').textContent = stats.away_devices;
+        document.getElementById('stat-detected').textContent = stats.home_devices;
+        document.getElementById('stat-lost').textContent = stats.away_devices;
         document.getElementById('stat-watchlisted').textContent = stats.watchlisted_devices;
         document.getElementById('stat-events').textContent = stats.events_today;
     } catch (e) {
@@ -121,7 +121,7 @@ function renderDevices() {
 
     tbody.innerHTML = devices.map(d => {
         const name = escapeHtml(d.friendly_name || d.advertised_name || '(unknown)');
-        const stateClass = d.state === 'HOME' ? 'state-home' : 'state-away';
+        const stateClass = d.state === 'DETECTED' ? 'state-detected' : 'state-lost';
         const watchClass = d.is_watchlisted ? 'active' : '';
         const rssi = d.last_rssi !== null ? d.last_rssi : 'n/a';
         const lastSeen = timeAgo(d.last_seen);
@@ -139,7 +139,7 @@ function renderDevices() {
             <td>${escapeHtml(d.manufacturer || '')}</td>
             <td>${rssi}</td>
             <td title="${formatTime(d.last_seen)}">${lastSeen}</td>
-            <td>${d.is_paired ? '<span class="state-badge state-home">Yes</span>' : '<span class="state-badge state-away">No</span>'}</td>
+            <td>${d.is_paired ? '<span class="state-badge state-detected">Yes</span>' : '<span class="state-badge state-lost">No</span>'}</td>
             <td>
                 <button class="notify-toggle ${d.is_notify ? 'active' : ''}"
                         onclick="toggleNotify('${d.mac_address}', ${!d.is_notify})">
@@ -548,8 +548,8 @@ async function loadPairingDevices() {
             const name = escapeHtml(d.friendly_name || d.advertised_name || '(unknown)');
             const paired = d.is_paired;
             const pairedBadge = paired
-                ? '<span class="state-badge state-home">Paired</span>'
-                : '<span class="state-badge state-away">Not Paired</span>';
+                ? '<span class="state-badge state-detected">Paired</span>'
+                : '<span class="state-badge state-lost">Not Paired</span>';
             const actionBtn = paired
                 ? `<button class="btn btn-unpair" onclick="unpairDevice('${d.mac_address}')">Unpair</button>`
                 : `<button class="btn btn-pair" onclick="pairDevice('${d.mac_address}')">Pair</button>`;

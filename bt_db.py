@@ -60,7 +60,7 @@ def init_db(db_path: str | Path = DEFAULT_DB_PATH) -> None:
             is_notify         INTEGER DEFAULT 0,
             first_seen        REAL,
             last_seen         REAL,
-            state             TEXT DEFAULT 'AWAY',
+            state             TEXT DEFAULT 'LOST',
             manufacturer_data TEXT,
             service_uuids     TEXT,
             ip_address        TEXT
@@ -94,6 +94,8 @@ def init_db(db_path: str | Path = DEFAULT_DB_PATH) -> None:
     conn.execute("CREATE TABLE IF NOT EXISTS migrations (name TEXT PRIMARY KEY)")
     _run_migration(conn, "watchlisted_notify_backfill",
                    "UPDATE devices SET is_notify = 1 WHERE is_watchlisted = 1 AND is_notify = 0")
+    _run_migration(conn, "rename_state_home_away",
+                   "UPDATE devices SET state = CASE WHEN state = 'HOME' THEN 'DETECTED' WHEN state = 'AWAY' THEN 'LOST' ELSE state END")
     conn.commit()
 
     conn.close()
@@ -149,7 +151,7 @@ def upsert_device(
             ip_address        = COALESCE(excluded.ip_address, devices.ip_address)
     """, (
         mac.upper(), advertised_name, device_type, manufacturer,
-        scan_type, rssi, now, now, state or "HOME",
+        scan_type, rssi, now, now, state or "DETECTED",
         mfr_json, uuid_json, ip_address,
     ))
     conn.commit()
@@ -350,7 +352,7 @@ def get_all_devices_merged(
     """Like get_all_devices but merges linked secondaries into their primary.
 
     Each primary row gets:
-      - state = HOME if any member is HOME
+      - state = DETECTED if any member is DETECTED
       - last_seen = max across group
       - scan_type = joined unique types (e.g. "BLE, WiFi")
       - linked_devices = list of secondary device dicts
@@ -388,10 +390,10 @@ def get_all_devices_merged(
         merged["linked_devices"] = secs
 
         if secs:
-            # Merge state: HOME if any member is HOME
+            # Merge state: DETECTED if any member is DETECTED
             all_members = [d] + secs
-            if any(m["state"] == "HOME" for m in all_members):
-                merged["state"] = "HOME"
+            if any(m["state"] == "DETECTED" for m in all_members):
+                merged["state"] = "DETECTED"
 
             # Merge last_seen: max across group
             last_seens = [m["last_seen"] for m in all_members if m["last_seen"]]
@@ -507,7 +509,7 @@ def get_stats(conn: sqlite3.Connection) -> dict[str, Any]:
         "SELECT COUNT(*) as c FROM devices WHERE is_hidden = 0 AND linked_to IS NULL"
     ).fetchone()["c"]
     home = conn.execute(
-        "SELECT COUNT(*) as c FROM devices WHERE state = 'HOME' AND is_hidden = 0 AND linked_to IS NULL"
+        "SELECT COUNT(*) as c FROM devices WHERE state = 'DETECTED' AND is_hidden = 0 AND linked_to IS NULL"
     ).fetchone()["c"]
     watchlisted = conn.execute(
         "SELECT COUNT(*) as c FROM devices WHERE is_watchlisted = 1 AND linked_to IS NULL"
