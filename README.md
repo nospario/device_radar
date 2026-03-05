@@ -1,4 +1,4 @@
-# Bluetooth Radar
+# Device Radar
 
 A presence-monitoring system for Raspberry Pi 5 that scans for nearby devices via BLE, Classic Bluetooth, and WiFi/LAN. It tracks device presence in a SQLite database, provides a real-time web dashboard, and sends push notifications via [ntfy.sh](https://ntfy.sh) when watched devices arrive or depart.
 
@@ -27,13 +27,10 @@ Supporting modules:
 
 ## Quick Start
 
-1. **Copy files** to the deployment directory:
+1. **Clone the repo** to the deployment directory:
 
    ```bash
-   sudo mkdir -p /opt/bt-monitor/{templates,static}
-   sudo cp *.py requirements.txt config.json /opt/bt-monitor/
-   sudo cp templates/* /opt/bt-monitor/templates/
-   sudo cp static/* /opt/bt-monitor/static/
+   sudo git clone https://github.com/nospario/device_radar.git /opt/bt-monitor
    ```
 
 2. **Install dependencies:**
@@ -61,6 +58,18 @@ Supporting modules:
    ```
 
    Then open `http://<pi-ip>:8080` in your browser.
+
+## Deployment
+
+Development is done in `/var/www/bluetooth/` (the git working copy). The production scanner and web dashboard run from `/opt/bt-monitor/` (a separate clone of the same repo).
+
+To deploy changes after committing and pushing:
+
+```bash
+./deploy.sh
+```
+
+This pulls the latest code into `/opt/bt-monitor/` and restarts the scanner service. The database (`bt_radar.db`) and config (`config.json`) are gitignored and are not affected by pulls.
 
 ## Web Dashboard
 
@@ -166,9 +175,9 @@ Devices can appear multiple times — once from BLE scanning (Bluetooth MAC) and
 - **Each MAC keeps its own state** — the scanner continues to track each MAC independently
 - **Merging happens at display and notification time** — the dashboard shows one row per group; notifications are sent once per group
 - A linked group has one **primary** device and one or more **secondaries**
-- The merged row shows: `HOME` if any member is home, the most recent `last_seen`, and combined scan types
-- Arrival notification fires only when the **first** member comes home
-- Departure notification fires only when **all** members have departed
+- The merged row shows: `DETECTED` if any member is detected, the most recent `last_seen`, and combined scan types
+- Arrival notification fires only when the **first** member is detected
+- Departure notification fires only when **all** members are lost
 
 ### How to link devices
 
@@ -234,6 +243,7 @@ bt-monitor/
 ├── config.json            # User configuration
 ├── bt_radar.db            # SQLite database (auto-created)
 ├── requirements.txt       # Python dependencies: bleak, httpx, flask
+├── deploy.sh              # Pull latest code to /opt/bt-monitor and restart service
 ├── bt-scanner.service     # Systemd unit for the scanner
 ├── bt-web.service         # Systemd unit for the web dashboard
 ├── templates/
