@@ -1,0 +1,16 @@
+[Unit]
+Description=Device Radar Telegram Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/bt-monitor/bt_telegram.py
+WorkingDirectory=/opt/bt-monitor
+Restart=always
+RestartSec=10
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=/home/pi/.openclaw/.env
+
+[Install]
+WantedBy=multi-user.target

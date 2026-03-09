@@ -9,7 +9,6 @@ import argparse
 import asyncio
 import json
 import logging
-import os
 import sqlite3
 import subprocess
 import sys
@@ -18,7 +17,6 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-import requests
 from bleak import BleakScanner
 from bleak.backends.device import BLEDevice
 from bleak.backends.scanner import AdvertisementData
@@ -26,6 +24,7 @@ from bleak.backends.scanner import AdvertisementData
 import bt_classify
 import bt_db
 import bt_pair
+import bt_telegram
 import bt_wifi
 
 logger = logging.getLogger("bt_scanner")
@@ -48,45 +47,6 @@ DEFAULT_CONFIG: dict[str, Any] = {
 }
 
 CONFIG_PATH = Path(__file__).resolve().parent / "config.json"
-
-# Telegram alert configuration — loaded from environment or .env file
-_TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-_TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
-
-# Try loading from /home/pi/.openclaw/.env if not in environment
-if not _TELEGRAM_BOT_TOKEN:
-    _env_path = Path("/home/pi/.openclaw/.env")
-    if _env_path.exists():
-        for line in _env_path.read_text().splitlines():
-            line = line.strip()
-            if line.startswith("#") or "=" not in line:
-                continue
-            key, _, val = line.partition("=")
-            if key.strip() == "TELEGRAM_BOT_TOKEN":
-                _TELEGRAM_BOT_TOKEN = val.strip()
-            elif key.strip() == "TELEGRAM_CHAT_ID":
-                _TELEGRAM_CHAT_ID = val.strip()
-
-
-def send_telegram_alert(device_name: str, event: str) -> None:
-    """Send a Telegram notification for device arrival/departure."""
-    if not _TELEGRAM_BOT_TOKEN or not _TELEGRAM_CHAT_ID:
-        return
-    url = f"https://api.telegram.org/bot{_TELEGRAM_BOT_TOKEN}/sendMessage"
-    if event == "arrived":
-        text = f"\U0001f4e1 *{device_name}* detected"
-    else:
-        text = f"\U0001f44b *{device_name}* departed"
-    payload = {
-        "chat_id": _TELEGRAM_CHAT_ID,
-        "text": text,
-        "parse_mode": "Markdown",
-    }
-    try:
-        requests.post(url, json=payload, timeout=5)
-    except Exception as e:
-        logger.error("Telegram alert failed: %s", e)
-
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -559,10 +519,10 @@ class BluetoothRadarScanner:
                 notified_groups.add(primary_mac)
                 notify_name = primary["friendly_name"] or primary["advertised_name"] or primary_mac
                 await self.notify(notify_name, "arrived")
-                send_telegram_alert(notify_name, "arrived")
+                await bt_telegram.send_notification(notify_name, "arrived")
             elif dev["is_notify"]:
                 await self.notify(dev_name, "arrived")
-                send_telegram_alert(dev_name, "arrived")
+                await bt_telegram.send_notification(dev_name, "arrived")
 
     async def _check_departures(
         self, conn: sqlite3.Connection, seen_macs: set[str], now: float
@@ -635,10 +595,10 @@ class BluetoothRadarScanner:
                     notified_groups.add(primary_mac)
                     notify_name = primary["friendly_name"] or primary["advertised_name"] or primary_mac
                     await self.notify(notify_name, "departed")
-                    send_telegram_alert(notify_name, "departed")
+                    await bt_telegram.send_notification(notify_name, "departed")
                 elif dev["is_notify"]:
                     await self.notify(dev_name, "departed")
-                    send_telegram_alert(dev_name, "departed")
+                    await bt_telegram.send_notification(dev_name, "departed")
 
     # ------------------------------------------------------------------
     # Main loop

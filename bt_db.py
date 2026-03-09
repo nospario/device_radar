@@ -90,6 +90,19 @@ def init_db(db_path: str | Path = DEFAULT_DB_PATH) -> None:
 
     conn.execute("CREATE INDEX IF NOT EXISTS idx_devices_linked_to ON devices(linked_to)")
 
+    # Chat history for Telegram bot conversations
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS chat_history (
+            id        INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id   TEXT NOT NULL,
+            role      TEXT NOT NULL,
+            content   TEXT NOT NULL,
+            timestamp REAL NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_chat_history_chat_id
+            ON chat_history(chat_id, timestamp DESC);
+    """)
+
     # One-time data migrations (tracked so they never re-run)
     conn.execute("CREATE TABLE IF NOT EXISTS migrations (name TEXT PRIMARY KEY)")
     _run_migration(conn, "watchlisted_notify_backfill",
@@ -545,5 +558,40 @@ def hide_stale_random_macs(conn: sqlite3.Connection, hours: int = 24) -> int:
           AND last_seen < ?
           AND SUBSTR(mac_address, 2, 1) IN ('2','3','6','7','A','B','E','F','a','b','e','f')
     """, (cutoff,))
+    conn.commit()
+    return cur.rowcount
+
+
+# ---------------------------------------------------------------------------
+# Chat history (Telegram bot)
+# ---------------------------------------------------------------------------
+
+def save_chat_message(
+    conn: sqlite3.Connection, chat_id: str, role: str, content: str
+) -> None:
+    """Save a chat message to history."""
+    conn.execute(
+        "INSERT INTO chat_history (chat_id, role, content, timestamp) VALUES (?, ?, ?, ?)",
+        (chat_id, role, content, time.time()),
+    )
+    conn.commit()
+
+
+def get_chat_history(
+    conn: sqlite3.Connection, chat_id: str, limit: int = 10
+) -> list[dict[str, Any]]:
+    """Return recent chat messages for a chat, oldest first."""
+    rows = conn.execute(
+        "SELECT role, content, timestamp FROM chat_history "
+        "WHERE chat_id = ? ORDER BY timestamp DESC LIMIT ?",
+        (chat_id, limit),
+    ).fetchall()
+    return [dict(r) for r in reversed(rows)]
+
+
+def cleanup_chat_history(conn: sqlite3.Connection, max_age_days: int = 7) -> int:
+    """Delete chat history entries older than max_age_days."""
+    cutoff = time.time() - (max_age_days * 86400)
+    cur = conn.execute("DELETE FROM chat_history WHERE timestamp < ?", (cutoff,))
     conn.commit()
     return cur.rowcount
