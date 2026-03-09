@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-A multi-module Python application for Raspberry Pi 5 that scans for nearby devices via BLE, Classic Bluetooth, and WiFi/LAN. It tracks device presence in a SQLite database, provides a real-time Flask web dashboard, and sends notifications via Telegram (and optionally ntfy.sh) when watched devices arrive or depart. Includes a Telegram bot with natural language presence queries powered by Ollama.
+A multi-module Python application for Raspberry Pi 5 that scans for nearby devices via BLE, Classic Bluetooth, and WiFi/LAN. It tracks device presence in a SQLite database, provides a real-time Flask web dashboard, and sends notifications via Telegram when watched devices arrive or depart. Includes a Telegram bot with natural language presence queries powered by Ollama.
 
 ## Target Environment
 
@@ -16,7 +16,7 @@ A multi-module Python application for Raspberry Pi 5 that scans for nearby devic
 
 Three services plus supporting modules:
 
-- **bt_scanner.py** — async background scanner: BLE, Classic Bluetooth, WiFi/LAN discovery, device classification, state tracking, and notifications (ntfy.sh + Telegram)
+- **bt_scanner.py** — async background scanner: BLE, Classic Bluetooth, WiFi/LAN discovery, device classification, state tracking, and Telegram notifications
 - **bt_web.py** — Flask web dashboard on port 8080 with REST API
 - **bt_telegram.py** — Telegram bot with presence queries, Ollama chat integration, and proactive arrival/departure notifications
 
@@ -48,7 +48,7 @@ Schema is created/migrated in `bt_db.init_db()`. New columns are added via `_add
 4. Classify devices using manufacturer data, device class, name patterns, and service UUIDs
 5. Upsert all discovered devices to SQLite with state `DETECTED`
 6. Track state transitions: `LOST→DETECTED` (arrival) and `DETECTED→LOST` (departure after threshold)
-7. On transitions for watchlisted devices, send notifications via ntfy.sh and Telegram
+7. On transitions for watchlisted devices, send notifications via Telegram
 8. Ignore BLE signals weaker than `rssi_threshold` (default -85 dBm)
 
 ## Device Linking
@@ -65,10 +65,6 @@ Devices can appear with different MACs across scan types (BLE vs WiFi). The `lin
 - Arrival/departure notifications sent via `bt_telegram.send_notification()` (async, httpx)
 - Bot token and chat ID loaded from environment variables or `/home/pi/.device-radar.env`
 - Config fields: `telegram_token_env`, `telegram_chat_id_env`
-
-### ntfy.sh (secondary)
-- POST to `{ntfy_server}/{ntfy_topic}` with Title, Priority, Tags headers
-- Arrival: tags `house,green_circle` — Departure: tags `wave,red_circle`
 
 ## Telegram Bot
 
@@ -92,8 +88,6 @@ Presence queries use the REST API (`localhost:8080`) where possible and fall bac
 
 ```json
 {
-  "ntfy_topic": "nospario_bluetooth_672051",
-  "ntfy_server": "https://ntfy.sh",
   "scan_interval_seconds": 15,
   "scan_duration_seconds": 8,
   "departure_threshold_seconds": 300,
@@ -172,7 +166,7 @@ Three services:
 ## Error Handling
 
 - Scan failures (BLE, Classic, WiFi) are caught per-type; the cycle continues
-- Notification failures (ntfy, Telegram) are logged but never block
+- Notification failures (Telegram) are logged but never block
 - Ollama timeouts return a friendly fallback message
 - Main scanner loop wrapped in try/except to survive any crash
 - The bot never crashes from bad Ollama responses or DB errors

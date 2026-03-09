@@ -1,6 +1,6 @@
 # Device Radar
 
-A presence-monitoring system for Raspberry Pi 5 that scans for nearby devices via BLE, Classic Bluetooth, and WiFi/LAN. It tracks device presence in a SQLite database, provides a real-time web dashboard, and sends notifications via Telegram and [ntfy.sh](https://ntfy.sh) when watched devices arrive or depart. Includes a Telegram bot for presence queries and general chat powered by a local Ollama LLM.
+A presence-monitoring system for Raspberry Pi 5 that scans for nearby devices via BLE, Classic Bluetooth, and WiFi/LAN. It tracks device presence in a SQLite database, provides a real-time web dashboard, and sends notifications via Telegram when watched devices arrive or depart. Includes a Telegram bot for presence queries and general chat powered by a local Ollama LLM.
 
 ## Prerequisites
 
@@ -180,8 +180,6 @@ Edit `config.json` in the same directory as the scripts:
 
 | Field | Default | Description |
 |---|---|---|
-| `ntfy_topic` | `nospario_bluetooth_672051` | ntfy.sh topic to publish notifications to |
-| `ntfy_server` | `https://ntfy.sh` | ntfy server URL |
 | `scan_interval_seconds` | `15` | Seconds between scan cycles |
 | `scan_duration_seconds` | `8` | How long each BLE scan lasts |
 | `departure_threshold_seconds` | `300` | Seconds without BLE/Classic detection before a device is considered departed |
@@ -257,17 +255,6 @@ Arrival and departure notifications are sent to Telegram via the bot. Notificati
 
 - Arrival: "📡 **Device Name** detected"
 - Departure: "👋 **Device Name** departed"
-
-### ntfy.sh (secondary)
-
-Notifications are also sent to ntfy.sh for redundancy:
-
-1. Install the **ntfy** app on your phone ([Android](https://play.google.com/store/apps/details?id=io.heckel.ntfy) / [iOS](https://apps.apple.com/app/ntfy/id1625396347))
-2. Subscribe to the topic: `nospario_bluetooth_672051`
-
-Notification tags:
-- Arrival: `house,green_circle`
-- Departure: `wave,red_circle`
 
 ## Systemd Services
 

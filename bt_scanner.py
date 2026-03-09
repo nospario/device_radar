@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Bluetooth Radar Scanner — discovers all nearby BLE and classic Bluetooth
-devices, classifies them, stores to SQLite, and sends ntfy notifications
+devices, classifies them, stores to SQLite, and sends Telegram notifications
 for watchlisted devices on state transitions."""
 
 from __future__ import annotations
@@ -16,7 +16,6 @@ import time
 from pathlib import Path
 from typing import Any
 
-import httpx
 from bleak import BleakScanner
 from bleak.backends.device import BLEDevice
 from bleak.backends.scanner import AdvertisementData
@@ -30,8 +29,6 @@ import bt_wifi
 logger = logging.getLogger("bt_scanner")
 
 DEFAULT_CONFIG: dict[str, Any] = {
-    "ntfy_topic": "nospario_bluetooth_672051",
-    "ntfy_server": "https://ntfy.sh",
     "scan_interval_seconds": 15,
     "scan_duration_seconds": 8,
     "departure_threshold_seconds": 300,
@@ -59,7 +56,7 @@ def load_or_create_config() -> dict[str, Any]:
         logger.info("Created default config at %s", CONFIG_PATH)
         print(
             f"Default configuration created at {CONFIG_PATH}\n"
-            "Edit it to configure ntfy settings, then run again."
+            "Edit it to configure your settings, then run again."
         )
         sys.exit(0)
 
@@ -110,8 +107,6 @@ class BluetoothRadarScanner:
 
     def __init__(self, config: dict[str, Any]) -> None:
         self.config = config
-        self.ntfy_topic: str = config["ntfy_topic"]
-        self.ntfy_server: str = config["ntfy_server"]
         self.scan_interval: int = config["scan_interval_seconds"]
         self.scan_duration: int = config["scan_duration_seconds"]
         self.departure_threshold: int = config["departure_threshold_seconds"]
@@ -214,64 +209,6 @@ class BluetoothRadarScanner:
             interface=self.wifi_interface,
             subnet=self.wifi_subnet,
         )
-
-    # ------------------------------------------------------------------
-    # Notifications
-    # ------------------------------------------------------------------
-
-    async def notify(self, device_name: str, event: str) -> None:
-        """Send a push notification via ntfy.sh."""
-        url = f"{self.ntfy_server}/{self.ntfy_topic}"
-
-        if event == "arrived":
-            title = f"{device_name} arrived"
-            message = f"{device_name} is now home"
-            tags = "house,green_circle"
-        else:
-            title = f"{device_name} departed"
-            message = f"{device_name} has left"
-            tags = "wave,red_circle"
-
-        headers = {
-            "Title": title,
-            "Priority": "default",
-            "Tags": tags,
-        }
-
-        try:
-            async with httpx.AsyncClient() as client:
-                resp = await client.post(url, content=message, headers=headers, timeout=10)
-                resp.raise_for_status()
-            logger.info("Notification sent: %s", title)
-        except Exception:
-            logger.error("Failed to send ntfy notification for '%s'", title, exc_info=True)
-
-    async def notify_new_wifi(
-        self, name: str, mac: str, ip: str | None, vendor: str | None
-    ) -> None:
-        """Send a push notification for a brand-new WiFi device."""
-        url = f"{self.ntfy_server}/{self.ntfy_topic}"
-        title = f"New WiFi device: {name}"
-        details = [mac]
-        if ip:
-            details.append(ip)
-        if vendor:
-            details.append(vendor)
-        message = f"New device joined the network: {' — '.join(details)}"
-
-        headers = {
-            "Title": title,
-            "Priority": "high",
-            "Tags": "warning,new",
-        }
-
-        try:
-            async with httpx.AsyncClient() as client:
-                resp = await client.post(url, content=message, headers=headers, timeout=10)
-                resp.raise_for_status()
-            logger.info("Notification sent: %s", title)
-        except Exception:
-            logger.error("Failed to send new WiFi notification for '%s'", title, exc_info=True)
 
     # ------------------------------------------------------------------
     # Discovery mode
@@ -437,7 +374,7 @@ class BluetoothRadarScanner:
                 seen_macs.add(wd.mac_address)
                 if is_new:
                     logger.info("New WiFi device detected: %s (%s)", display_name, wd.mac_address)
-                    await self.notify_new_wifi(display_name, wd.mac_address, wd.ip_address, wd.vendor)
+                    await bt_telegram.send_notification(display_name, "arrived")
 
         # -- State transitions --
         await self._check_arrivals(conn, seen_macs, prev_states)
@@ -518,10 +455,8 @@ class BluetoothRadarScanner:
 
                 notified_groups.add(primary_mac)
                 notify_name = primary["friendly_name"] or primary["advertised_name"] or primary_mac
-                await self.notify(notify_name, "arrived")
                 await bt_telegram.send_notification(notify_name, "arrived")
             elif dev["is_notify"]:
-                await self.notify(dev_name, "arrived")
                 await bt_telegram.send_notification(dev_name, "arrived")
 
     async def _check_departures(
@@ -594,10 +529,8 @@ class BluetoothRadarScanner:
 
                     notified_groups.add(primary_mac)
                     notify_name = primary["friendly_name"] or primary["advertised_name"] or primary_mac
-                    await self.notify(notify_name, "departed")
                     await bt_telegram.send_notification(notify_name, "departed")
                 elif dev["is_notify"]:
-                    await self.notify(dev_name, "departed")
                     await bt_telegram.send_notification(dev_name, "departed")
 
     # ------------------------------------------------------------------
