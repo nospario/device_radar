@@ -104,6 +104,19 @@ def init_db(db_path: str | Path = DEFAULT_DB_PATH) -> None:
             ON chat_history(chat_id, timestamp DESC);
     """)
 
+    # Echo devices table for Alexa encourage mode
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS echo_devices (
+            device_name           TEXT PRIMARY KEY,
+            alias                 TEXT,
+            encourage_enabled     INTEGER DEFAULT 0,
+            encourage_interval    INTEGER DEFAULT 30,
+            encourage_prompt      TEXT DEFAULT '',
+            encourage_when_playing INTEGER DEFAULT 1,
+            last_encouraged       REAL DEFAULT 0
+        );
+    """)
+
     # One-time data migrations (tracked so they never re-run)
     conn.execute("CREATE TABLE IF NOT EXISTS migrations (name TEXT PRIMARY KEY)")
     _run_migration(conn, "watchlisted_notify_backfill",
@@ -600,3 +613,95 @@ def cleanup_chat_history(conn: sqlite3.Connection, max_age_days: int = 7) -> int
     cur = conn.execute("DELETE FROM chat_history WHERE timestamp < ?", (cutoff,))
     conn.commit()
     return cur.rowcount
+
+
+# ---------------------------------------------------------------------------
+# Echo devices (Alexa encourage mode)
+# ---------------------------------------------------------------------------
+
+def upsert_echo_device(
+    conn: sqlite3.Connection,
+    device_name: str,
+    *,
+    alias: str | None = None,
+    encourage_enabled: bool | None = None,
+    encourage_interval: int | None = None,
+    encourage_prompt: str | None = None,
+    encourage_when_playing: bool | None = None,
+) -> None:
+    """Insert or update an Echo device record."""
+    conn.execute("""
+        INSERT INTO echo_devices (device_name, alias)
+        VALUES (?, ?)
+        ON CONFLICT(device_name) DO NOTHING
+    """, (device_name, alias))
+
+    sets: list[str] = []
+    params: list[Any] = []
+    if alias is not None:
+        sets.append("alias = ?")
+        params.append(alias)
+    if encourage_enabled is not None:
+        sets.append("encourage_enabled = ?")
+        params.append(int(encourage_enabled))
+    if encourage_interval is not None:
+        sets.append("encourage_interval = ?")
+        params.append(encourage_interval)
+    if encourage_prompt is not None:
+        sets.append("encourage_prompt = ?")
+        params.append(encourage_prompt)
+    if encourage_when_playing is not None:
+        sets.append("encourage_when_playing = ?")
+        params.append(int(encourage_when_playing))
+
+    if sets:
+        params.append(device_name)
+        conn.execute(
+            f"UPDATE echo_devices SET {', '.join(sets)} WHERE device_name = ?",
+            params,
+        )
+    conn.commit()
+
+
+def get_echo_device(conn: sqlite3.Connection, device_name: str) -> dict[str, Any] | None:
+    """Fetch a single Echo device by name."""
+    row = conn.execute(
+        "SELECT * FROM echo_devices WHERE device_name = ?", (device_name,)
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def get_all_echo_devices(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """Fetch all Echo devices."""
+    rows = conn.execute(
+        "SELECT * FROM echo_devices ORDER BY device_name"
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_enabled_echo_devices(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """Fetch Echo devices with encourage mode enabled."""
+    rows = conn.execute(
+        "SELECT * FROM echo_devices WHERE encourage_enabled = 1"
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def update_echo_last_encouraged(
+    conn: sqlite3.Connection, device_name: str, timestamp: float,
+) -> None:
+    """Update the last_encouraged timestamp for an Echo device."""
+    conn.execute(
+        "UPDATE echo_devices SET last_encouraged = ? WHERE device_name = ?",
+        (timestamp, device_name),
+    )
+    conn.commit()
+
+
+def delete_echo_device(conn: sqlite3.Connection, device_name: str) -> bool:
+    """Delete an Echo device. Returns True if a row was deleted."""
+    cur = conn.execute(
+        "DELETE FROM echo_devices WHERE device_name = ?", (device_name,)
+    )
+    conn.commit()
+    return cur.rowcount > 0

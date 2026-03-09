@@ -268,6 +268,165 @@ async def announce_arrival(
 
 
 # ---------------------------------------------------------------------------
+# Player state query
+# ---------------------------------------------------------------------------
+
+async def query_player_state(
+    device_name: str, config: dict[str, Any],
+) -> str | None:
+    """Query the current player state of an Echo device.
+
+    Returns 'PLAYING', 'PAUSED', 'IDLE', or None on failure.
+    """
+    script_path = config.get("alexa_script_path", "/opt/bt-monitor/alexa_remote_control.sh")
+    env_file = config.get("alexa_env_file", "/home/pi/.alexa-env")
+
+    if not Path(script_path).exists():
+        return None
+
+    env = _parse_env_file(env_file)
+    if not env.get("REFRESH_TOKEN"):
+        return None
+
+    try:
+        proc = await asyncio.wait_for(
+            asyncio.create_subprocess_exec(
+                script_path, "-d", device_name, "-q",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env={**dict(__import__("os").environ), **env},
+            ),
+            timeout=30,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+        output = stdout.decode()
+
+        # Parse currentState from the media/state JSON block
+        import json as _json
+        for line in output.split("\n{"):
+            block = "{" + line if not line.startswith("{") else line
+            try:
+                data = _json.loads(block.strip())
+                if "currentState" in data:
+                    return data["currentState"]
+            except _json.JSONDecodeError:
+                continue
+        return "IDLE"
+    except Exception as e:
+        logger.debug("Failed to query player state for %s: %s", device_name, e)
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Encourage mode
+# ---------------------------------------------------------------------------
+
+async def generate_encouragement(prompt: str, config: dict[str, Any]) -> str | None:
+    """Generate an encouraging message via Ollama."""
+    base_url = config.get("ollama_url", "http://localhost:11434")
+    timeout = config.get("ollama_timeout_seconds", 15)
+    model = config.get("alexa_ollama_model") or config.get("ollama_model", "qwen2.5:1.5b")
+
+    time_of_day = _get_time_of_day()
+    day_of_week = datetime.now().strftime("%A")
+
+    full_prompt = (
+        f"{prompt} "
+        f"It is {time_of_day} on {day_of_week}. "
+        f"Keep it to a single sentence, casual and friendly, under 30 words. "
+        f"Do not use emoji, hashtags, special characters, or quotation marks. "
+        f"Vary the message each time. Just output the message, nothing else."
+    )
+
+    payload: dict[str, Any] = {
+        "model": model,
+        "prompt": full_prompt,
+        "stream": False,
+    }
+
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                f"{base_url}/api/generate", json=payload, timeout=timeout,
+            )
+            resp.raise_for_status()
+            message = resp.json().get("response", "").strip()
+            message = message.strip('"').strip("'")
+            if message:
+                return message
+    except httpx.TimeoutException:
+        logger.warning("Ollama timed out generating encouragement after %ds", timeout)
+    except Exception as e:
+        logger.error("Ollama encouragement error: %s", e)
+    return None
+
+
+async def run_encourage_loop(config: dict[str, Any], db_path: Path) -> None:
+    """Background loop that sends encouragement messages to enabled Echo devices."""
+    logger.info("Encourage loop started")
+
+    while True:
+        try:
+            await asyncio.sleep(60)  # check every 60 seconds
+
+            if not config.get("alexa_enabled"):
+                continue
+
+            conn = bt_db.get_connection(db_path)
+            try:
+                devices = bt_db.get_enabled_echo_devices(conn)
+            finally:
+                conn.close()
+
+            if not devices:
+                continue
+
+            now = time.time()
+
+            for dev in devices:
+                device_name = dev["device_name"]
+                interval = dev["encourage_interval"] * 60  # convert to seconds
+                last = dev["last_encouraged"] or 0
+                prompt = dev["encourage_prompt"]
+
+                if not prompt:
+                    continue
+
+                if now - last < interval:
+                    continue
+
+                # Check if music is playing (if required)
+                if dev["encourage_when_playing"]:
+                    state = await query_player_state(device_name, config)
+                    if state != "PLAYING":
+                        logger.debug(
+                            "Skipping encourage for %s — state is %s",
+                            device_name, state,
+                        )
+                        continue
+
+                # Generate and speak the message
+                message = await generate_encouragement(prompt, config)
+                if not message:
+                    logger.warning("Failed to generate encouragement for %s", device_name)
+                    continue
+
+                logger.info("Encourage %s: %s", device_name, message)
+                success = await speak(message, config, device=device_name)
+
+                if success:
+                    conn = bt_db.get_connection(db_path)
+                    bt_db.update_echo_last_encouraged(conn, device_name, now)
+                    conn.close()
+                    logger.info("Encouragement sent to %s", device_name)
+                else:
+                    logger.error("Failed to speak encouragement on %s", device_name)
+
+        except Exception:
+            logger.error("Error in encourage loop", exc_info=True)
+
+
+# ---------------------------------------------------------------------------
 # Test mode
 # ---------------------------------------------------------------------------
 

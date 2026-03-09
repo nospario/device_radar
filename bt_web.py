@@ -104,6 +104,13 @@ def pairing():
     return render_template("pairing.html", active="pairing")
 
 
+@app.route("/alexa")
+def alexa():
+    config = load_config()
+    alexa_enabled = config.get("alexa_enabled", False)
+    return render_template("alexa.html", active="alexa", alexa_enabled=alexa_enabled)
+
+
 # ---------------------------------------------------------------------------
 # API endpoints
 # ---------------------------------------------------------------------------
@@ -294,6 +301,72 @@ def api_unlink_device(mac: str):
 
     if not ok:
         return jsonify({"error": "device was not linked"}), 400
+    return jsonify({"ok": True})
+
+
+# ---------------------------------------------------------------------------
+# Echo Devices API (Alexa encourage mode)
+# ---------------------------------------------------------------------------
+
+@app.route("/api/echo-devices")
+def api_echo_devices():
+    conn = get_conn()
+    devices = bt_db.get_all_echo_devices(conn)
+    conn.close()
+    return jsonify(devices)
+
+
+@app.route("/api/echo-devices", methods=["POST"])
+def api_create_echo_device():
+    data = request.get_json()
+    if not data or "device_name" not in data:
+        return jsonify({"error": "device_name required"}), 400
+
+    conn = get_conn()
+    bt_db.upsert_echo_device(
+        conn,
+        data["device_name"],
+        alias=data.get("alias"),
+        encourage_enabled=data.get("encourage_enabled", False),
+        encourage_interval=data.get("encourage_interval", 30),
+        encourage_prompt=data.get("encourage_prompt", ""),
+        encourage_when_playing=data.get("encourage_when_playing", True),
+    )
+    conn.close()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/echo-devices/<path:name>", methods=["PATCH"])
+def api_update_echo_device(name: str):
+    data = request.get_json()
+    if not data:
+        return jsonify({"error": "no data"}), 400
+
+    conn = get_conn()
+    kwargs: dict[str, Any] = {}
+    if "alias" in data:
+        kwargs["alias"] = data["alias"]
+    if "encourage_enabled" in data:
+        kwargs["encourage_enabled"] = bool(data["encourage_enabled"])
+    if "encourage_interval" in data:
+        kwargs["encourage_interval"] = int(data["encourage_interval"])
+    if "encourage_prompt" in data:
+        kwargs["encourage_prompt"] = data["encourage_prompt"]
+    if "encourage_when_playing" in data:
+        kwargs["encourage_when_playing"] = bool(data["encourage_when_playing"])
+
+    bt_db.upsert_echo_device(conn, name, **kwargs)
+    conn.close()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/echo-devices/<path:name>", methods=["DELETE"])
+def api_delete_echo_device(name: str):
+    conn = get_conn()
+    ok = bt_db.delete_echo_device(conn, name)
+    conn.close()
+    if not ok:
+        return jsonify({"error": "not found"}), 404
     return jsonify({"ok": True})
 
 

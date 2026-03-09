@@ -1,0 +1,351 @@
+{% extends "base.html" %}
+{% block title %}Alexa Devices - Device Radar{% endblock %}
+
+{% block content %}
+<div class="section">
+    <div class="section-header">
+        <h2>Alexa Echo Devices</h2>
+        <button class="btn btn-primary" onclick="showAddDevice()">Add Device</button>
+    </div>
+
+    {% if not alexa_enabled %}
+    <div class="pairing-note">
+        Alexa integration is disabled. Set <code>"alexa_enabled": true</code> in config.json to enable.
+    </div>
+    {% endif %}
+
+    <div id="status-msg" class="pair-status" style="display:none;"></div>
+
+    <div id="echo-devices-list"></div>
+</div>
+
+<!-- Add device modal -->
+<div id="add-modal" class="modal-overlay" style="display:none;">
+    <div class="modal-card">
+        <h3>Add Echo Device</h3>
+        <div class="form-group">
+            <label for="add-device-name">Device Name</label>
+            <input type="text" id="add-device-name" placeholder="e.g. Mathilde's Dot">
+        </div>
+        <div class="form-group">
+            <label for="add-alias">Alias (short name)</label>
+            <input type="text" id="add-alias" placeholder="e.g. mathilde">
+        </div>
+        <div class="modal-buttons">
+            <button class="btn" onclick="hideAddDevice()">Cancel</button>
+            <button class="btn btn-primary" onclick="addDevice()">Add</button>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<style>
+    .echo-card {
+        background: var(--bg-card);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        padding: 1.25rem;
+        margin-bottom: 1rem;
+    }
+    .echo-card-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 1rem;
+    }
+    .echo-card-header h3 {
+        font-size: 1rem;
+        margin: 0;
+    }
+    .echo-card-header .alias {
+        color: var(--text-dim);
+        font-size: 0.85rem;
+        margin-left: 0.5rem;
+    }
+    .echo-card-body {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 1rem;
+        align-items: start;
+    }
+    .echo-field {
+        margin-bottom: 0.75rem;
+    }
+    .echo-field label {
+        display: block;
+        font-size: 0.8rem;
+        color: var(--text-dim);
+        margin-bottom: 0.25rem;
+    }
+    .echo-field input[type="number"] {
+        background: var(--bg);
+        color: var(--text);
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        padding: 0.4rem 0.6rem;
+        font-size: 0.85rem;
+        width: 80px;
+    }
+    .echo-field input[type="number"]:focus {
+        outline: none;
+        border-color: var(--accent);
+    }
+    .echo-field textarea {
+        width: 100%;
+        background: var(--bg);
+        color: var(--text);
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        padding: 0.4rem 0.6rem;
+        font-size: 0.85rem;
+        font-family: inherit;
+        resize: vertical;
+        min-height: 60px;
+    }
+    .echo-field textarea:focus {
+        outline: none;
+        border-color: var(--accent);
+    }
+    .echo-toggle {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+    }
+    .toggle-switch {
+        position: relative;
+        width: 44px;
+        height: 24px;
+        cursor: pointer;
+    }
+    .toggle-switch input {
+        opacity: 0;
+        width: 0;
+        height: 0;
+    }
+    .toggle-slider {
+        position: absolute;
+        top: 0; left: 0; right: 0; bottom: 0;
+        background: var(--border);
+        border-radius: 12px;
+        transition: background 0.2s;
+    }
+    .toggle-slider:before {
+        content: "";
+        position: absolute;
+        width: 18px;
+        height: 18px;
+        left: 3px;
+        bottom: 3px;
+        background: var(--text);
+        border-radius: 50%;
+        transition: transform 0.2s;
+    }
+    .toggle-switch input:checked + .toggle-slider {
+        background: var(--green);
+    }
+    .toggle-switch input:checked + .toggle-slider:before {
+        transform: translateX(20px);
+    }
+    .echo-actions {
+        display: flex;
+        gap: 0.5rem;
+        align-items: center;
+    }
+    .prompt-area {
+        grid-column: 1 / -1;
+    }
+    .modal-overlay {
+        position: fixed;
+        top: 0; left: 0; right: 0; bottom: 0;
+        background: rgba(0,0,0,0.6);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        z-index: 200;
+    }
+    .modal-card {
+        background: var(--bg-card);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        padding: 1.5rem;
+        min-width: 320px;
+        max-width: 90%;
+    }
+    .modal-card h3 {
+        margin-bottom: 1rem;
+    }
+    .modal-card .form-group {
+        margin-bottom: 1rem;
+    }
+    .modal-card .form-group label {
+        display: block;
+        font-size: 0.85rem;
+        color: var(--text-dim);
+        margin-bottom: 0.3rem;
+    }
+    .modal-card .form-group input {
+        width: 100%;
+    }
+    .modal-buttons {
+        display: flex;
+        gap: 0.5rem;
+        justify-content: flex-end;
+        margin-top: 1rem;
+    }
+    .btn-danger {
+        background: rgba(255, 69, 58, 0.1);
+        color: var(--red);
+        border-color: rgba(255, 69, 58, 0.4);
+    }
+    .btn-danger:hover { background: rgba(255, 69, 58, 0.25); }
+
+    @media (max-width: 768px) {
+        .echo-card-body { grid-template-columns: 1fr; }
+    }
+</style>
+
+<script>
+async function loadEchoDevices() {
+    try {
+        const devices = await api('/api/echo-devices');
+        const container = document.getElementById('echo-devices-list');
+
+        if (devices.length === 0) {
+            container.innerHTML = '<p class="text-dim" style="padding:1rem;">No Echo devices configured. Click "Add Device" to get started.</p>';
+            return;
+        }
+
+        container.innerHTML = devices.map(d => `
+            <div class="echo-card" data-name="${escapeHtml(d.device_name)}">
+                <div class="echo-card-header">
+                    <div>
+                        <h3 style="display:inline;">${escapeHtml(d.device_name)}</h3>
+                        ${d.alias ? `<span class="alias">(${escapeHtml(d.alias)})</span>` : ''}
+                    </div>
+                    <div class="echo-actions">
+                        <button class="btn btn-sm" onclick="saveEchoDevice('${escapeHtml(d.device_name)}')">Save</button>
+                        <button class="btn btn-sm btn-danger" onclick="deleteEchoDevice('${escapeHtml(d.device_name)}')">Remove</button>
+                    </div>
+                </div>
+                <div class="echo-card-body">
+                    <div>
+                        <div class="echo-field">
+                            <div class="echo-toggle">
+                                <label class="toggle-switch">
+                                    <input type="checkbox" class="echo-enabled" ${d.encourage_enabled ? 'checked' : ''}>
+                                    <span class="toggle-slider"></span>
+                                </label>
+                                <span style="font-size:0.85rem;">Encourage Mode</span>
+                            </div>
+                        </div>
+                        <div class="echo-field">
+                            <label>Interval (minutes)</label>
+                            <input type="number" class="echo-interval" value="${d.encourage_interval}" min="1" max="1440">
+                        </div>
+                        <div class="echo-field">
+                            <div class="echo-toggle">
+                                <label class="toggle-switch">
+                                    <input type="checkbox" class="echo-when-playing" ${d.encourage_when_playing ? 'checked' : ''}>
+                                    <span class="toggle-slider"></span>
+                                </label>
+                                <span style="font-size:0.85rem;">Only when playing music</span>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="prompt-area">
+                        <div class="echo-field">
+                            <label>Encourage Prompt (what Ollama should generate)</label>
+                            <textarea class="echo-prompt" rows="3">${escapeHtml(d.encourage_prompt || '')}</textarea>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        `).join('');
+    } catch (e) {
+        console.error('Failed to load echo devices:', e);
+    }
+}
+
+async function saveEchoDevice(name) {
+    const card = document.querySelector(`.echo-card[data-name="${name}"]`);
+    if (!card) return;
+
+    const data = {
+        encourage_enabled: card.querySelector('.echo-enabled').checked,
+        encourage_interval: parseInt(card.querySelector('.echo-interval').value) || 30,
+        encourage_when_playing: card.querySelector('.echo-when-playing').checked,
+        encourage_prompt: card.querySelector('.echo-prompt').value,
+    };
+
+    try {
+        await api(`/api/echo-devices/${encodeURIComponent(name)}`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data),
+        });
+        showStatus('Settings saved!', true);
+    } catch (e) {
+        showStatus('Failed to save settings', false);
+        console.error('Save error:', e);
+    }
+}
+
+async function deleteEchoDevice(name) {
+    if (!confirm(`Remove ${name}?`)) return;
+    try {
+        await api(`/api/echo-devices/${encodeURIComponent(name)}`, { method: 'DELETE' });
+        showStatus('Device removed', true);
+        loadEchoDevices();
+    } catch (e) {
+        showStatus('Failed to remove device', false);
+        console.error('Delete error:', e);
+    }
+}
+
+function showAddDevice() {
+    document.getElementById('add-modal').style.display = 'flex';
+    document.getElementById('add-device-name').focus();
+}
+
+function hideAddDevice() {
+    document.getElementById('add-modal').style.display = 'none';
+}
+
+async function addDevice() {
+    const name = document.getElementById('add-device-name').value.trim();
+    const alias = document.getElementById('add-alias').value.trim();
+    if (!name) {
+        showStatus('Device name is required', false);
+        return;
+    }
+
+    try {
+        await api('/api/echo-devices', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ device_name: name, alias: alias || null }),
+        });
+        hideAddDevice();
+        document.getElementById('add-device-name').value = '';
+        document.getElementById('add-alias').value = '';
+        showStatus('Device added', true);
+        loadEchoDevices();
+    } catch (e) {
+        showStatus('Failed to add device', false);
+        console.error('Add error:', e);
+    }
+}
+
+function showStatus(msg, success) {
+    const el = document.getElementById('status-msg');
+    el.textContent = msg;
+    el.className = 'pair-status ' + (success ? 'pair-success' : 'pair-error');
+    el.style.display = 'block';
+    setTimeout(() => { el.style.display = 'none'; }, 3000);
+}
+
+// Init
+loadEchoDevices();
+</script>
+{% endblock %}
