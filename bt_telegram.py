@@ -322,7 +322,7 @@ async def _ollama_chat(
 
 
 # ---------------------------------------------------------------------------
-# Telegram bot handlers
+# Telegram bot handlers — helpers
 # ---------------------------------------------------------------------------
 
 try:
@@ -341,31 +341,121 @@ def _is_authorized(chat_id: int) -> bool:
     return not authorized or str(chat_id) == authorized
 
 
-async def _cmd_home(update, context) -> None:
-    """Handle /home — quick summary of detected devices."""
-    if not _is_authorized(update.effective_chat.id):
-        return
-    config = load_config()
-    db_path = BASE_DIR / config.get("db_path", "bt_radar.db")
-    await update.message.reply_text(
-        await answer_presence("who is home", config, db_path),
+def _parse_args(args: list[str] | None) -> tuple[list[str], bool]:
+    """Split command args into (remaining_args, watchlist_only)."""
+    if not args:
+        return [], False
+    remaining: list[str] = []
+    wl = False
+    for a in args:
+        if a.lower() in ("watchlist", "wl"):
+            wl = True
+        else:
+            remaining.append(a)
+    return remaining, wl
+
+
+def _device_name(dev: dict) -> str:
+    """Get display name for a device."""
+    return (
+        dev.get("friendly_name")
+        or dev.get("advertised_name")
+        or dev.get("mac_address", "Unknown")
     )
 
 
-async def _cmd_devices(update, context) -> None:
-    """Handle /devices — list all watchlisted devices with status."""
+def _format_event_time(ts: float) -> str:
+    """Format a timestamp as HH:MM for event listings."""
+    from datetime import datetime
+
+    return datetime.fromtimestamp(ts).strftime("%H:%M")
+
+
+def _get_db_path() -> Path:
+    """Get the database path from config."""
+    config = load_config()
+    return BASE_DIR / config.get("db_path", "bt_radar.db")
+
+
+# ---------------------------------------------------------------------------
+# Telegram bot handlers — commands
+# ---------------------------------------------------------------------------
+
+async def _cmd_home(update, context) -> None:
+    """Handle /home [watchlist] — detected devices."""
     if not _is_authorized(update.effective_chat.id):
         return
-    data = await _api_get("/api/devices", {"watchlisted": "1"})
+    _, wl = _parse_args(context.args)
+    params: dict[str, str] = {"state": "DETECTED"}
+    if wl:
+        params["watchlisted"] = "1"
+    data = await _api_get("/api/devices", params)
+    if data is None:
+        await update.message.reply_text("Couldn't reach Device Radar.")
+        return
     if not data:
-        await update.message.reply_text("No watchlisted devices found.")
+        msg = "No watchlisted devices detected." if wl else "No devices currently detected."
+        await update.message.reply_text(msg)
         return
     lines = []
     for d in data:
-        name = d.get("friendly_name") or d.get("advertised_name") or d["mac_address"]
+        lines.append(f"\U0001f7e2 {_device_name(d)} \u2014 {_time_ago(d.get('last_seen'))}")
+    header = f"{len(data)} device(s) detected"
+    if wl:
+        header += " (watchlisted)"
+    await update.message.reply_text(f"{header}:\n" + "\n".join(lines))
+
+
+async def _cmd_away(update, context) -> None:
+    """Handle /away [watchlist] — devices not currently detected."""
+    if not _is_authorized(update.effective_chat.id):
+        return
+    _, wl = _parse_args(context.args)
+    params: dict[str, str] = {"state": "LOST"}
+    if wl:
+        params["watchlisted"] = "1"
+    data = await _api_get("/api/devices", params)
+    if data is None:
+        await update.message.reply_text("Couldn't reach Device Radar.")
+        return
+    if not data:
+        msg = "All watchlisted devices are home!" if wl else "No lost devices."
+        await update.message.reply_text(msg)
+        return
+    show = data[:20]
+    lines = []
+    for d in show:
+        lines.append(f"\U0001f534 {_device_name(d)} \u2014 {_time_ago(d.get('last_seen'))}")
+    header = f"{len(data)} device(s) away"
+    if wl:
+        header += " (watchlisted)"
+    text = f"{header}:\n" + "\n".join(lines)
+    if len(data) > 20:
+        text += f"\n\u2026and {len(data) - 20} more"
+    await update.message.reply_text(text)
+
+
+async def _cmd_devices(update, context) -> None:
+    """Handle /devices [watchlist] — list all devices with status."""
+    if not _is_authorized(update.effective_chat.id):
+        return
+    _, wl = _parse_args(context.args)
+    params: dict[str, str] = {}
+    if wl:
+        params["watchlisted"] = "1"
+    data = await _api_get("/api/devices", params)
+    if not data:
+        await update.message.reply_text("No devices found.")
+        return
+    lines = []
+    for d in data[:30]:
         icon = "\U0001f7e2" if d.get("state") == "DETECTED" else "\U0001f534"
-        lines.append(f"{icon} {name} \u2014 {_time_ago(d.get('last_seen'))}")
-    await update.message.reply_text("\n".join(lines))
+        wl_mark = " \u2b50" if d.get("is_watchlisted") else ""
+        lines.append(f"{icon} {_device_name(d)}{wl_mark} \u2014 {_time_ago(d.get('last_seen'))}")
+    text = "\n".join(lines)
+    if len(data) > 30:
+        text += f"\n\u2026and {len(data) - 30} more"
+    await update.message.reply_text(text)
 
 
 async def _cmd_lastseen(update, context) -> None:
@@ -377,19 +467,304 @@ async def _cmd_lastseen(update, context) -> None:
         return
     name = " ".join(context.args)
     config = load_config()
-    db_path = BASE_DIR / config.get("db_path", "bt_radar.db")
+    db_path = _get_db_path()
     conn = bt_db.get_connection(db_path)
     dev = _resolve_person(name, config, conn)
     conn.close()
     if not dev:
         await update.message.reply_text(f"Unknown: \"{name}\"")
         return
-    dev_name = dev.get("friendly_name") or dev.get("advertised_name") or dev["mac_address"]
     state = "detected \U0001f7e2" if dev["state"] == "DETECTED" else "lost \U0001f534"
     await update.message.reply_text(
-        f"{dev_name} \u2014 {state}, last seen {_time_ago(dev.get('last_seen'))}",
+        f"{_device_name(dev)} \u2014 {state}, last seen {_time_ago(dev.get('last_seen'))}",
     )
 
+
+async def _cmd_status(update, context) -> None:
+    """Handle /status — system health overview."""
+    if not _is_authorized(update.effective_chat.id):
+        return
+    data = await _api_get("/api/stats")
+    if data is None:
+        await update.message.reply_text("Couldn't reach Device Radar.")
+        return
+
+    import subprocess as sp
+
+    def _svc_status(name: str) -> str:
+        try:
+            r = sp.run(
+                ["systemctl", "is-active", name],
+                capture_output=True, text=True, timeout=5,
+            )
+            return r.stdout.strip()
+        except Exception:
+            return "unknown"
+
+    scanner = _svc_status("bt-scanner")
+    bot = _svc_status("bt-telegram")
+    web = _svc_status("bt-web")
+    s_icon = "\U0001f7e2" if scanner == "active" else "\U0001f534"
+    b_icon = "\U0001f7e2" if bot == "active" else "\U0001f534"
+    w_icon = "\U0001f7e2" if web == "active" else "\U0001f534"
+
+    lines = [
+        "\U0001f4ca Device Radar Status",
+        "",
+        f"{data.get('home_devices', 0)} detected \u2022 "
+        f"{data.get('away_devices', 0)} lost \u2022 "
+        f"{data.get('watchlisted_devices', 0)} watchlisted",
+        f"{data.get('events_today', 0)} events today",
+        "",
+        f"{s_icon} Scanner: {scanner}",
+        f"{w_icon} Web: {web}",
+        f"{b_icon} Bot: {bot}",
+    ]
+    await update.message.reply_text("\n".join(lines))
+
+
+async def _cmd_history(update, context) -> None:
+    """Handle /history [name] [watchlist] — recent events."""
+    if not _is_authorized(update.effective_chat.id):
+        return
+    args, wl = _parse_args(context.args)
+    config = load_config()
+    db_path = _get_db_path()
+    conn = bt_db.get_connection(db_path)
+
+    try:
+        mac_filter = None
+        person_name = None
+        if args:
+            person_name = " ".join(args)
+            dev = _resolve_person(person_name, config, conn)
+            if not dev:
+                await update.message.reply_text(f"Unknown: \"{person_name}\"")
+                return
+            mac_filter = dev["mac_address"]
+
+        events = bt_db.get_events(conn, mac=mac_filter, limit=50)
+
+        if wl:
+            wl_macs = {
+                d["mac_address"]
+                for d in bt_db.get_all_devices(
+                    conn, watchlisted_only=True, include_hidden=True,
+                )
+            }
+            events = [e for e in events if e["mac_address"] in wl_macs]
+
+        events = events[:10]
+        if not events:
+            await update.message.reply_text("No events found.")
+            return
+
+        lines = []
+        for e in events:
+            icon = "\U0001f7e2" if e["event_type"] == "arrived" else "\U0001f534"
+            name = (
+                e.get("friendly_name")
+                or e.get("d_adv_name")
+                or e.get("device_name")
+                or e["mac_address"]
+            )
+            t = _format_event_time(e["timestamp"])
+            ago = _time_ago(e["timestamp"])
+            lines.append(f"{icon} {name} {e['event_type']} at {t} ({ago})")
+
+        header = "Last 10 events"
+        if person_name:
+            header = f"Last events for {_device_name(dev)}"
+        if wl:
+            header += " (watchlisted)"
+        await update.message.reply_text(f"{header}:\n" + "\n".join(lines))
+    finally:
+        conn.close()
+
+
+async def _cmd_today(update, context) -> None:
+    """Handle /today [watchlist] — today's arrivals and departures."""
+    if not _is_authorized(update.effective_chat.id):
+        return
+    _, wl = _parse_args(context.args)
+    db_path = _get_db_path()
+    conn = bt_db.get_connection(db_path)
+
+    try:
+        from datetime import datetime
+
+        midnight = (
+            datetime.now()
+            .replace(hour=0, minute=0, second=0, microsecond=0)
+            .timestamp()
+        )
+        rows = conn.execute(
+            "SELECT e.*, d.friendly_name, d.is_watchlisted "
+            "FROM events e "
+            "LEFT JOIN devices d ON e.mac_address = d.mac_address "
+            "WHERE e.timestamp >= ? ORDER BY e.timestamp DESC",
+            (midnight,),
+        ).fetchall()
+        events = [dict(r) for r in rows]
+
+        if wl:
+            events = [e for e in events if e.get("is_watchlisted")]
+
+        if not events:
+            msg = "No events today"
+            if wl:
+                msg += " (watchlisted)"
+            await update.message.reply_text(msg + ".")
+            return
+
+        lines = []
+        for e in events[:20]:
+            icon = "\U0001f7e2" if e["event_type"] == "arrived" else "\U0001f534"
+            name = (
+                e.get("friendly_name")
+                or e.get("device_name")
+                or e["mac_address"]
+            )
+            t = _format_event_time(e["timestamp"])
+            lines.append(f"{icon} {t} \u2014 {name} {e['event_type']}")
+
+        header = f"{len(events)} event(s) today"
+        if wl:
+            header += " (watchlisted)"
+        text = f"{header}:\n" + "\n".join(lines)
+        if len(events) > 20:
+            text += f"\n\u2026and {len(events) - 20} more"
+        await update.message.reply_text(text)
+    finally:
+        conn.close()
+
+
+async def _cmd_notify_toggle(update, context) -> None:
+    """Handle /notify on|off <name> — toggle notifications for a device."""
+    if not _is_authorized(update.effective_chat.id):
+        return
+    args, _ = _parse_args(context.args)
+    if len(args) < 2 or args[0].lower() not in ("on", "off"):
+        await update.message.reply_text("Usage: /notify on|off <name>")
+        return
+
+    action = args[0].lower()
+    name = " ".join(args[1:])
+    config = load_config()
+    db_path = _get_db_path()
+    conn = bt_db.get_connection(db_path)
+
+    try:
+        dev = _resolve_person(name, config, conn)
+        if not dev:
+            await update.message.reply_text(f"Unknown: \"{name}\"")
+            return
+        enabled = action == "on"
+        bt_db.update_device(conn, dev["mac_address"], is_notify=enabled)
+        status = "enabled \U0001f514" if enabled else "disabled \U0001f515"
+        await update.message.reply_text(
+            f"Notifications {status} for {_device_name(dev)}",
+        )
+    finally:
+        conn.close()
+
+
+async def _cmd_find(update, context) -> None:
+    """Handle /find <name> — detailed device info."""
+    if not _is_authorized(update.effective_chat.id):
+        return
+    args, _ = _parse_args(context.args)
+    if not args:
+        await update.message.reply_text("Usage: /find <name>")
+        return
+
+    name = " ".join(args)
+    config = load_config()
+    db_path = _get_db_path()
+    conn = bt_db.get_connection(db_path)
+
+    try:
+        dev = _resolve_person(name, config, conn)
+        if not dev:
+            await update.message.reply_text(f"Unknown: \"{name}\"")
+            return
+
+        state_icon = "\U0001f7e2" if dev["state"] == "DETECTED" else "\U0001f534"
+        wl_mark = " \u2b50" if dev.get("is_watchlisted") else ""
+        notify_icon = "\U0001f514" if dev.get("is_notify") else "\U0001f515"
+
+        lines = [
+            f"{state_icon} {_device_name(dev)}{wl_mark}",
+            "",
+            f"MAC: {dev['mac_address']}",
+            f"Type: {dev.get('device_type', 'Unknown')}",
+            f"Scan: {dev.get('scan_type', 'Unknown')}",
+        ]
+        if dev.get("manufacturer"):
+            lines.append(f"Manufacturer: {dev['manufacturer']}")
+        if dev.get("ip_address"):
+            lines.append(f"IP: {dev['ip_address']}")
+        if dev.get("last_rssi"):
+            lines.append(f"RSSI: {dev['last_rssi']} dBm")
+        lines.extend([
+            f"First seen: {_time_ago(dev.get('first_seen'))}",
+            f"Last seen: {_time_ago(dev.get('last_seen'))}",
+            f"Notifications: {notify_icon}",
+            f"Watchlisted: {'yes' if dev.get('is_watchlisted') else 'no'}",
+        ])
+
+        group = bt_db.get_link_group(conn, dev["mac_address"])
+        if group["secondaries"]:
+            linked = ", ".join(_device_name(s) for s in group["secondaries"])
+            lines.append(f"Linked: {linked}")
+        elif (
+            group["primary"]
+            and group["primary"]["mac_address"] != dev["mac_address"]
+        ):
+            lines.append(f"Linked to: {_device_name(group['primary'])}")
+
+        await update.message.reply_text("\n".join(lines))
+    finally:
+        conn.close()
+
+
+async def _cmd_watchlist(update, context) -> None:
+    """Handle /watchlist — show all watchlisted devices grouped by state."""
+    if not _is_authorized(update.effective_chat.id):
+        return
+    data = await _api_get("/api/devices", {"watchlisted": "1"})
+    if not data:
+        await update.message.reply_text("No watchlisted devices.")
+        return
+
+    detected = [d for d in data if d.get("state") == "DETECTED"]
+    lost = [d for d in data if d.get("state") != "DETECTED"]
+
+    lines = [f"\u2b50 Watchlist ({len(data)} devices):"]
+    if detected:
+        lines.append("")
+        lines.append("Detected:")
+        for d in detected:
+            n = "\U0001f514" if d.get("is_notify") else "\U0001f515"
+            lines.append(
+                f"  \U0001f7e2 {_device_name(d)} {n}"
+                f" \u2014 {_time_ago(d.get('last_seen'))}",
+            )
+    if lost:
+        lines.append("")
+        lines.append("Lost:")
+        for d in lost:
+            n = "\U0001f514" if d.get("is_notify") else "\U0001f515"
+            lines.append(
+                f"  \U0001f534 {_device_name(d)} {n}"
+                f" \u2014 {_time_ago(d.get('last_seen'))}",
+            )
+    await update.message.reply_text("\n".join(lines))
+
+
+# ---------------------------------------------------------------------------
+# Telegram bot handlers — message router
+# ---------------------------------------------------------------------------
 
 async def _handle_message(update, context) -> None:
     """Route incoming messages to presence handler or Ollama."""
@@ -400,7 +775,7 @@ async def _handle_message(update, context) -> None:
 
     text = update.message.text
     config = load_config()
-    db_path = BASE_DIR / config.get("db_path", "bt_radar.db")
+    db_path = _get_db_path()
     chat_id = str(update.effective_chat.id)
 
     # Presence query — answer directly
@@ -484,17 +859,32 @@ def main() -> None:
 
     app = Application.builder().token(token).build()
     app.add_handler(CommandHandler("home", _cmd_home))
+    app.add_handler(CommandHandler("away", _cmd_away))
     app.add_handler(CommandHandler("devices", _cmd_devices))
+    app.add_handler(CommandHandler("watchlist", _cmd_watchlist))
     app.add_handler(CommandHandler("lastseen", _cmd_lastseen))
+    app.add_handler(CommandHandler("status", _cmd_status))
+    app.add_handler(CommandHandler("history", _cmd_history))
+    app.add_handler(CommandHandler("today", _cmd_today))
+    app.add_handler(CommandHandler("notify", _cmd_notify_toggle))
+    app.add_handler(CommandHandler("find", _cmd_find))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, _handle_message))
 
     # Register bot commands with Telegram so they appear in the / menu
     async def _post_init(application) -> None:
         from telegram import BotCommand
+
         await application.bot.set_my_commands([
             BotCommand("home", "Who is home right now"),
-            BotCommand("devices", "List all watched devices with status"),
+            BotCommand("away", "Who is away"),
+            BotCommand("devices", "List all devices with status"),
+            BotCommand("watchlist", "Show watchlisted devices"),
             BotCommand("lastseen", "When a device was last seen"),
+            BotCommand("status", "System health overview"),
+            BotCommand("history", "Recent arrival/departure events"),
+            BotCommand("today", "Today's events summary"),
+            BotCommand("notify", "Toggle notifications (on/off name)"),
+            BotCommand("find", "Detailed info about a device"),
         ])
 
     app.post_init = _post_init
