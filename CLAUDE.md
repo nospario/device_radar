@@ -1,46 +1,94 @@
-# Bluetooth Presence Monitor
+# Device Radar
 
 ## Project Overview
 
-A Python application for Raspberry Pi 5 that scans for known BLE (Bluetooth Low Energy) devices (phones, watches, etc.) and sends push notifications via ntfy.sh when they arrive or depart.
+A multi-module Python application for Raspberry Pi 5 that scans for nearby devices via BLE, Classic Bluetooth, and WiFi/LAN. It tracks device presence in a SQLite database, provides a real-time Flask web dashboard, and sends notifications via Telegram (and optionally ntfy.sh) when watched devices arrive or depart. Includes a Telegram bot with natural language presence queries powered by Ollama.
 
 ## Target Environment
 
 - Raspberry Pi 5 running Raspberry Pi OS 64-bit (Bookworm)
 - Python 3.11+
-- Runs as a systemd service under root (required for BLE scanning)
-- Deployed to `/opt/bt-monitor/`
+- Runs as systemd services under root (required for BLE scanning)
+- Development directory: `/var/www/bluetooth/`
+- Production directory: `/opt/bt-monitor/`
 
 ## Architecture
 
-Single async Python script using:
+Three services plus supporting modules:
 
-- **bleak** — BLE scanning (async, cross-platform)
-- **httpx** — async HTTP client for ntfy.sh API calls
-- **asyncio** — main event loop
+- **bt_scanner.py** — async background scanner: BLE, Classic Bluetooth, WiFi/LAN discovery, device classification, state tracking, and notifications (ntfy.sh + Telegram)
+- **bt_web.py** — Flask web dashboard on port 8080 with REST API
+- **bt_telegram.py** — Telegram bot with presence queries, Ollama chat integration, and proactive arrival/departure notifications
 
-No database. No web UI. No Docker. Keep it simple and lightweight.
+Supporting modules:
+
+| Module | Purpose |
+|---|---|
+| `bt_db.py` | SQLite schema (WAL mode), migrations, and all query/mutation functions |
+| `bt_classify.py` | Device type and manufacturer identification from BLE data, device class codes, and name patterns |
+| `bt_pair.py` | Bluetooth pairing/unpairing via `bluetoothctl` subprocess |
+| `bt_wifi.py` | WiFi/LAN device discovery via ping sweep + ARP table parsing |
+
+## Database
+
+SQLite with WAL mode (`bt_radar.db`). Core tables:
+
+- **devices** — all known devices with state (`DETECTED`/`LOST`), scan info, flags (`is_watchlisted`, `is_notify`, `is_hidden`, `is_paired`), and device linking (`linked_to`)
+- **events** — arrival/departure event log with timestamps
+- **chat_history** — Telegram bot conversation history for Ollama context
+- **migrations** — tracks one-time data migrations
+
+Schema is created/migrated in `bt_db.init_db()`. New columns are added via `_add_column()`. One-time data migrations use `_run_migration()`.
 
 ## Core Behaviour
 
 1. Every `scan_interval_seconds` (default 15), perform a BLE scan lasting `scan_duration_seconds` (default 8)
-2. Compare discovered devices against a configured list of known MAC addresses
-3. Track each device's state as either HOME or AWAY
-4. On state transition HOME→AWAY (departure) or AWAY→HOME (arrival), send a notification to ntfy.sh
-5. Ignore signals weaker than `rssi_threshold` (default -85) to avoid false positives from distant devices
-6. A device is considered departed after `departure_threshold_seconds` (default 90) without detection
+2. Every 4th cycle, also scan Classic Bluetooth via `hcitool inq`
+3. Every Nth cycle (configurable), scan WiFi/LAN via ping sweep + ARP
+4. Classify devices using manufacturer data, device class, name patterns, and service UUIDs
+5. Upsert all discovered devices to SQLite with state `DETECTED`
+6. Track state transitions: `LOST→DETECTED` (arrival) and `DETECTED→LOST` (departure after threshold)
+7. On transitions for watchlisted devices, send notifications via ntfy.sh and Telegram
+8. Ignore BLE signals weaker than `rssi_threshold` (default -85 dBm)
 
-## ntfy.sh Configuration
+## Device Linking
 
-- **Server:** `https://ntfy.sh`
-- **Topic:** `nospario_bluetooth_672051`
-- Use ntfy HTTP headers for rich notifications: `Title`, `Priority`, `Tags`
-- Arrival notifications: tags `house,green_circle`
-- Departure notifications: tags `wave,red_circle`
+Devices can appear with different MACs across scan types (BLE vs WiFi). The `linked_to` column creates groups with one primary and N secondaries. Group-aware behaviour:
+
+- Dashboard merges linked devices into one row
+- Arrival notification fires when the **first** member is detected (and no notify-enabled member was already home)
+- Departure notification fires when **all** members are lost
+
+## Notifications
+
+### Telegram (primary)
+- Arrival/departure notifications sent via `bt_telegram.send_notification()` (async, httpx)
+- Bot token and chat ID loaded from environment variables or `/home/pi/.openclaw/.env`
+- Config fields: `telegram_token_env`, `telegram_chat_id_env`
+
+### ntfy.sh (secondary)
+- POST to `{ntfy_server}/{ntfy_topic}` with Title, Priority, Tags headers
+- Arrival: tags `house,green_circle` — Departure: tags `wave,red_circle`
+
+## Telegram Bot
+
+`bt_telegram.py` runs as a separate service. Features:
+
+- **Presence queries** — intent-routed via regex patterns (no LLM needed):
+  - "who's home", "is anyone home", "is Richard home", "where is Laura"
+  - "when did Richard arrive", "how long has Laura been away"
+  - `/home`, `/devices`, `/lastseen <name>` slash commands
+- **Person resolution** — maps names to devices via `person_aliases` config, then fuzzy-matches `friendly_name`, then resolves link groups
+- **General chat** — forwarded to local Ollama instance (configurable model, default `qwen2.5:7b`)
+- **Conversation history** — stored in `chat_history` SQLite table, last N messages sent as context
+- **Authorization** — only responds to the configured `TELEGRAM_CHAT_ID`
+- **Graceful degradation** — presence queries work without Ollama; chat returns friendly error on timeout
+
+Presence queries use the REST API (`localhost:8080`) where possible and fall back to direct DB reads for history queries.
 
 ## Configuration File
 
-Use a `config.json` file in the same directory as the script. Structure:
+`config.json` in the same directory as the scripts. Gitignored — not deployed via git.
 
 ```json
 {
@@ -48,110 +96,131 @@ Use a `config.json` file in the same directory as the script. Structure:
   "ntfy_server": "https://ntfy.sh",
   "scan_interval_seconds": 15,
   "scan_duration_seconds": 8,
-  "departure_threshold_seconds": 90,
+  "departure_threshold_seconds": 300,
   "rssi_threshold": -85,
-  "devices": {
-    "AA:BB:CC:DD:EE:FF": "Example Phone",
-    "11:22:33:44:55:66": "Example Watch"
-  }
+  "db_path": "bt_radar.db",
+  "web_port": 8080,
+  "cleanup_stale_hours": 24,
+  "wifi_scan_enabled": true,
+  "wifi_scan_interval_cycles": 4,
+  "wifi_departure_threshold_seconds": 600,
+  "wifi_interface": "wlan0",
+  "wifi_subnet": null,
+  "devices": {},
+  "telegram_bot_enabled": true,
+  "telegram_token_env": "TELEGRAM_BOT_TOKEN",
+  "telegram_chat_id_env": "TELEGRAM_CHAT_ID",
+  "ollama_url": "http://localhost:11434",
+  "ollama_model": "qwen2.5:7b",
+  "ollama_timeout_seconds": 15,
+  "conversation_history_length": 10,
+  "person_aliases": {
+    "richard": "Richard's iPhone",
+    "laura": "Laura's iPhone"
+  },
+  "system_prompt": "You are a helpful assistant running locally on a Raspberry Pi at home. Keep responses concise and conversational — aim for 2-3 sentences unless asked for more detail."
 }
 ```
 
-On first run, if `config.json` doesn't exist, create a default one with an empty devices dict and the ntfy topic above, then exit with a message telling the user to add their devices.
+On first run, if `config.json` doesn't exist, a default is created and the script exits with instructions.
+
+## Web Dashboard & REST API
+
+Flask app on port 8080 with dark theme.
+
+### Pages
+- **Dashboard** (`/`) — live device list with stats, filters, watchlist/notify toggles
+- **Device Detail** (`/device/<mac>`) — info, settings, linking, event history
+- **History** (`/history`) — filterable paginated event log
+- **Pairing** (`/pairing`) — pair/unpair via web UI
+
+### Key API Endpoints
+- `GET /api/devices` — all devices (filters: state, watchlisted, hidden, scan_type, unmerged)
+- `GET /api/devices/present` — currently detected devices (merged)
+- `GET /api/devices/<mac>` — single device
+- `PATCH /api/devices/<mac>` — update device fields
+- `GET /api/events` — paginated events (filters: mac, event_type)
+- `GET /api/stats` — dashboard counters
+- `POST /api/devices/<mac>/link` — link devices
+- `POST /api/devices/<mac>/pair` — initiate pairing
+- `POST /api/device/<id>/notifications` — toggle notifications
 
 ## Discovery Mode
 
-When `devices` is empty, the script should run in discovery mode: scan and log all detected BLE devices with their MAC address, advertised name (if any), and RSSI. This helps the user find their device addresses. Format each line clearly, e.g.:
-
+```bash
+sudo python3 bt_scanner.py --discover        # BLE + Classic Bluetooth
+sudo python3 bt_scanner.py --discover-wifi   # WiFi/LAN devices
 ```
-12:34:56:78:9A:BC  "Galaxy Watch5"  RSSI: -62
-AA:BB:CC:DD:EE:FF  (unknown)        RSSI: -78
-```
-
-## Device Name Matching (Optional Feature)
-
-Because modern phones randomise BLE MAC addresses, support an optional `device_names` field in config as a fallback matching strategy:
-
-```json
-{
-  "device_names": {
-    "Richard's iPhone": "Richard's Phone",
-    "Galaxy Watch5": "Laura's Watch"
-  }
-}
-```
-
-When present, match on the advertised BLE name in addition to MAC address. MAC matches take priority. Document this in the README.
 
 ## Logging
 
-- Use Python's `logging` module
+- Python `logging` module
 - Default level: INFO
-- Format: `%(asctime)s [%(levelname)s] %(message)s` with `%H:%M:%S` time format
-- Log arrival/departure events at INFO
-- Log scan results at DEBUG
-- Log errors (scan failures, ntfy failures) at ERROR with the exception detail
+- Format: `%(asctime)s [%(levelname)s] %(message)s` with `%H:%M:%S` time
+- Telegram bot uses: `%(asctime)s [%(levelname)s] %(name)s: %(message)s`
 
-## Systemd Service
+## Systemd Services
 
-Provide a `bt-monitor.service` unit file:
+Three services:
 
-- Run as root (BLE requires it)
-- WorkingDirectory: `/opt/bt-monitor`
-- Restart on failure with 10s delay
-- After: `bluetooth.target`, `network-online.target`
-
-## File Structure
-
-```
-bt-monitor/
-├── bt_monitor.py          # Main application
-├── config.json            # User configuration (generated on first run)
-├── requirements.txt       # Python dependencies: bleak, httpx
-├── bt-monitor.service     # Systemd unit file
-└── README.md              # Setup and usage guide
-```
+| Service | Unit File | Description |
+|---|---|---|
+| `bt-scanner` | `bt-scanner.service` | Background scanner |
+| `bt-web` | `bt-web.service` | Flask web dashboard |
+| `bt-telegram` | `bt-telegram.service` | Telegram bot (loads env from `/home/pi/.openclaw/.env`) |
 
 ## Error Handling
 
-- If a BLE scan fails (e.g. adapter busy), log the error and continue to the next scan cycle. Do not crash.
-- If ntfy.sh POST fails, log the error and continue. Do not retry — the next state change will trigger a new notification.
-- Wrap the main loop in a try/except so individual scan cycle failures never kill the service.
+- Scan failures (BLE, Classic, WiFi) are caught per-type; the cycle continues
+- Notification failures (ntfy, Telegram) are logged but never block
+- Ollama timeouts return a friendly fallback message
+- Main scanner loop wrapped in try/except to survive any crash
+- The bot never crashes from bad Ollama responses or DB errors
 
 ## Code Style
 
 - Type hints throughout
-- Dataclasses for device state
-- Enum for presence states (HOME/AWAY)
+- `from __future__ import annotations` for modern annotation syntax
 - async/await for all I/O
-- No global mutable state — encapsulate in a monitor class
-- Keep it in a single file (`bt_monitor.py`) — this isn't complex enough to warrant a package
-
-## Testing
-
-- The script must be testable by running `python3 bt_monitor.py` as root on the Pi
-- For development without a BLE adapter, the scan method should be the only hardware-dependent part, making it easy to mock
-- Include a `--discover` CLI flag as a shortcut for discovery mode (scan and print all devices, ignore config)
+- Dataclasses for structured data where appropriate
+- No global mutable state — encapsulate in classes or module-level caches
+- Single-file modules (each service is one .py file)
 
 ## Dependencies
 
 ```
 bleak>=0.21.0
 httpx>=0.25.0
+flask>=3.0.0
+python-telegram-bot>=21.0
+python-dotenv>=1.0.0
 ```
 
-Install with: `pip install -r requirements.txt --break-system-packages`
+Install: `pip install -r requirements.txt --break-system-packages`
 
-## README Content
+## File Structure
 
-The README should cover:
+```
+bt-monitor/
+├── bt_scanner.py          # Background scanner service
+├── bt_web.py              # Flask web dashboard service
+├── bt_telegram.py         # Telegram bot service
+├── bt_db.py               # SQLite database module
+├── bt_classify.py         # Device classification logic
+├── bt_pair.py             # Bluetooth pairing helper
+├── bt_wifi.py             # WiFi/LAN scanning module
+├── config.json            # User configuration (gitignored)
+├── bt_radar.db            # SQLite database (auto-created, gitignored)
+├── requirements.txt       # Python dependencies
+├── deploy.sh              # Pull latest code and restart services
+├── bt-scanner.service     # Systemd unit for scanner
+├── bt-web.service         # Systemd unit for web dashboard
+├── bt-telegram.service    # Systemd unit for Telegram bot
+├── templates/             # Jinja2 templates (dashboard, device, history, pairing)
+├── static/                # CSS and JS (dark theme)
+└── README.md
+```
 
-1. What the project does (one paragraph)
-2. Prerequisites (Pi model, OS, Python version, Bluetooth enabled)
-3. Quick start (copy files, install deps, edit config, test run)
-4. How to find device MAC addresses (discovery mode + bluetoothctl)
-5. MAC randomisation warning and workarounds (pairing, name matching)
-6. Configuration reference table
-7. How to subscribe to notifications in the ntfy app
-8. Systemd service installation and log viewing
-9. Device name matching as an alternative to MAC addresses
+## Deployment
+
+Development in `/var/www/bluetooth/`, production in `/opt/bt-monitor/` (separate git clone). Deploy via `./deploy.sh` which pulls latest and restarts services. Database and config are gitignored.

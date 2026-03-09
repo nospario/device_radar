@@ -1,6 +1,6 @@
 # Device Radar
 
-A presence-monitoring system for Raspberry Pi 5 that scans for nearby devices via BLE, Classic Bluetooth, and WiFi/LAN. It tracks device presence in a SQLite database, provides a real-time web dashboard, and sends push notifications via [ntfy.sh](https://ntfy.sh) when watched devices arrive or depart.
+A presence-monitoring system for Raspberry Pi 5 that scans for nearby devices via BLE, Classic Bluetooth, and WiFi/LAN. It tracks device presence in a SQLite database, provides a real-time web dashboard, and sends notifications via Telegram and [ntfy.sh](https://ntfy.sh) when watched devices arrive or depart. Includes a Telegram bot for presence queries and general chat powered by a local Ollama LLM.
 
 ## Prerequisites
 
@@ -11,10 +11,11 @@ A presence-monitoring system for Raspberry Pi 5 that scans for nearby devices vi
 
 ## Architecture
 
-The system consists of two services:
+The system consists of three services:
 
 - **bt_scanner.py** — the background scanner that discovers devices, classifies them, tracks presence state, and sends notifications
 - **bt_web.py** — a Flask web dashboard on port 8080 for viewing devices, history, pairing, and managing device settings
+- **bt_telegram.py** — a Telegram bot for presence queries, Ollama-powered chat, and proactive arrival/departure notifications
 
 Supporting modules:
 
@@ -80,6 +81,57 @@ The dashboard provides:
 - **History** — filterable event log with pagination
 - **Pairing** — pair/unpair Bluetooth devices via the web UI
 
+## Telegram Bot
+
+The Telegram bot (`bt_telegram.py`) provides interactive presence queries and general chat.
+
+### Setup
+
+1. Create a bot via [@BotFather](https://t.me/BotFather) on Telegram and note the token
+2. Get your chat ID by messaging [@userinfobot](https://t.me/userinfobot)
+3. Add credentials to `/home/pi/.openclaw/.env`:
+
+   ```
+   TELEGRAM_BOT_TOKEN=your_bot_token_here
+   TELEGRAM_CHAT_ID=your_chat_id_here
+   ```
+
+4. Set `"telegram_bot_enabled": true` in `config.json`
+
+### Presence Commands
+
+| Command | Description |
+|---|---|
+| `/home` | Quick summary of who's detected |
+| `/devices` | List all watchlisted devices with status |
+| `/lastseen <name>` | When a device was last seen |
+
+You can also ask natural language questions:
+
+- "Is anyone home?"
+- "Is Richard home?"
+- "When did Laura arrive?"
+- "How long has Richard been away?"
+
+### General Chat
+
+Any message that isn't a presence query is forwarded to a local Ollama instance for conversational responses. Conversation history is maintained across messages.
+
+### Person Aliases
+
+Map short names to devices in `config.json`:
+
+```json
+{
+  "person_aliases": {
+    "richard": "Richard's iPhone",
+    "laura": "Laura's iPhone"
+  }
+}
+```
+
+Values should match a device's `friendly_name`. The bot resolves linked device groups automatically — a person is "home" if any device in their group is detected.
+
 ## Finding Device MAC Addresses
 
 ### Discovery Mode
@@ -124,6 +176,8 @@ Modern phones (especially iPhones and recent Android devices) randomise their BL
 
 Edit `config.json` in the same directory as the scripts:
 
+### Scanner Settings
+
 | Field | Default | Description |
 |---|---|---|
 | `ntfy_topic` | `nospario_bluetooth_672051` | ntfy.sh topic to publish notifications to |
@@ -135,34 +189,41 @@ Edit `config.json` in the same directory as the scripts:
 | `db_path` | `bt_radar.db` | Path to the SQLite database file |
 | `web_port` | `8080` | Port for the web dashboard |
 | `cleanup_stale_hours` | `24` | Hours before stale random-MAC devices are auto-hidden |
+
+### WiFi Settings
+
+| Field | Default | Description |
+|---|---|---|
 | `wifi_scan_enabled` | `false` | Enable WiFi/LAN device scanning |
 | `wifi_scan_interval_cycles` | `4` | Run WiFi scan every N BLE scan cycles |
 | `wifi_departure_threshold_seconds` | `600` | Seconds without WiFi detection before departure |
 | `wifi_interface` | `wlan0` | Network interface for WiFi scanning |
 | `wifi_subnet` | `null` | Subnet to scan (auto-detected from interface if null) |
+
+### Telegram Bot Settings
+
+| Field | Default | Description |
+|---|---|---|
+| `telegram_bot_enabled` | `false` | Enable the Telegram bot service |
+| `telegram_token_env` | `TELEGRAM_BOT_TOKEN` | Environment variable name for the bot token |
+| `telegram_chat_id_env` | `TELEGRAM_CHAT_ID` | Environment variable name for the authorized chat ID |
+| `person_aliases` | `{}` | Map of short names to device `friendly_name` values |
+
+### Ollama Settings
+
+| Field | Default | Description |
+|---|---|---|
+| `ollama_url` | `http://localhost:11434` | Ollama API endpoint |
+| `ollama_model` | `qwen2.5:7b` | Model to use for chat responses |
+| `ollama_timeout_seconds` | `15` | Timeout for Ollama requests (falls back to direct answer) |
+| `conversation_history_length` | `10` | Number of recent messages to include as context |
+| `system_prompt` | *(see config)* | System prompt sent to Ollama for general chat |
+
+### Other
+
+| Field | Default | Description |
+|---|---|---|
 | `devices` | `{}` | Map of MAC address to friendly name (migrated to DB on first run) |
-
-### Example config.json
-
-```json
-{
-  "ntfy_topic": "nospario_bluetooth_672051",
-  "ntfy_server": "https://ntfy.sh",
-  "scan_interval_seconds": 15,
-  "scan_duration_seconds": 8,
-  "departure_threshold_seconds": 300,
-  "rssi_threshold": -85,
-  "db_path": "bt_radar.db",
-  "web_port": 8080,
-  "cleanup_stale_hours": 24,
-  "wifi_scan_enabled": true,
-  "wifi_scan_interval_cycles": 4,
-  "wifi_departure_threshold_seconds": 600,
-  "wifi_interface": "wlan0",
-  "wifi_subnet": null,
-  "devices": {}
-}
-```
 
 Note: Devices listed in `config.json` under `devices` are migrated into the SQLite database as watchlisted on first run. After that, manage devices through the web dashboard.
 
@@ -188,11 +249,21 @@ Devices can appear multiple times — once from BLE scanning (Bluetooth MAC) and
 
 To unlink, click **Unlink** next to any linked device on the detail page.
 
-## Subscribing to Notifications
+## Notifications
+
+### Telegram (primary)
+
+Arrival and departure notifications are sent to Telegram via the bot. Notifications are sent as part of the scanner's state transition logic — no polling required.
+
+- Arrival: "📡 **Device Name** detected"
+- Departure: "👋 **Device Name** departed"
+
+### ntfy.sh (secondary)
+
+Notifications are also sent to ntfy.sh for redundancy:
 
 1. Install the **ntfy** app on your phone ([Android](https://play.google.com/store/apps/details?id=io.heckel.ntfy) / [iOS](https://apps.apple.com/app/ntfy/id1625396347))
 2. Subscribe to the topic: `nospario_bluetooth_672051`
-3. You'll receive notifications whenever a watched device arrives or departs
 
 Notification tags:
 - Arrival: `house,green_circle`
@@ -200,13 +271,13 @@ Notification tags:
 
 ## Systemd Services
 
-Install both services to run automatically at boot:
+Install all three services to run automatically at boot:
 
 ```bash
-sudo cp bt-scanner.service bt-web.service /etc/systemd/system/
+sudo cp bt-scanner.service bt-web.service bt-telegram.service /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable bt-scanner bt-web
-sudo systemctl start bt-scanner bt-web
+sudo systemctl enable bt-scanner bt-web bt-telegram
+sudo systemctl start bt-scanner bt-web bt-telegram
 ```
 
 ### Viewing Logs
@@ -218,6 +289,9 @@ sudo journalctl -u bt-scanner -f
 # Follow web dashboard logs
 sudo journalctl -u bt-web -f
 
+# Follow Telegram bot logs
+sudo journalctl -u bt-telegram -f
+
 # View recent scanner logs
 sudo journalctl -u bt-scanner --since "1 hour ago"
 ```
@@ -225,9 +299,9 @@ sudo journalctl -u bt-scanner --since "1 hour ago"
 ### Managing the Services
 
 ```bash
-sudo systemctl status bt-scanner bt-web    # Check status
-sudo systemctl restart bt-scanner bt-web   # Restart both
-sudo systemctl stop bt-scanner bt-web      # Stop both
+sudo systemctl status bt-scanner bt-web bt-telegram   # Check status
+sudo systemctl restart bt-scanner bt-web bt-telegram   # Restart all
+sudo systemctl stop bt-scanner bt-web bt-telegram      # Stop all
 ```
 
 ## File Structure
@@ -236,16 +310,18 @@ sudo systemctl stop bt-scanner bt-web      # Stop both
 bt-monitor/
 ├── bt_scanner.py          # Background scanner service
 ├── bt_web.py              # Flask web dashboard service
+├── bt_telegram.py         # Telegram bot service
 ├── bt_db.py               # SQLite database module
 ├── bt_classify.py         # Device classification logic
 ├── bt_pair.py             # Bluetooth pairing helper
 ├── bt_wifi.py             # WiFi/LAN scanning module
 ├── config.json            # User configuration
 ├── bt_radar.db            # SQLite database (auto-created)
-├── requirements.txt       # Python dependencies: bleak, httpx, flask
+├── requirements.txt       # Python dependencies
 ├── deploy.sh              # Pull latest code to /opt/bt-monitor and restart service
 ├── bt-scanner.service     # Systemd unit for the scanner
 ├── bt-web.service         # Systemd unit for the web dashboard
+├── bt-telegram.service    # Systemd unit for the Telegram bot
 ├── templates/
 │   ├── base.html          # Base layout with navbar
 │   ├── dashboard.html     # Main device list
