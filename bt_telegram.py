@@ -31,9 +31,9 @@ def _load_env() -> None:
     """Load .env file as fallback for environment variables."""
     try:
         from dotenv import load_dotenv
-        load_dotenv("/home/pi/.openclaw/.env")
+        load_dotenv("/home/pi/.device-radar.env")
     except ImportError:
-        env_path = Path("/home/pi/.openclaw/.env")
+        env_path = Path("/home/pi/.device-radar.env")
         if not env_path.exists():
             return
         for line in env_path.read_text().splitlines():

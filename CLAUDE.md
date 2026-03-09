@@ -63,7 +63,7 @@ Devices can appear with different MACs across scan types (BLE vs WiFi). The `lin
 
 ### Telegram (primary)
 - Arrival/departure notifications sent via `bt_telegram.send_notification()` (async, httpx)
-- Bot token and chat ID loaded from environment variables or `/home/pi/.openclaw/.env`
+- Bot token and chat ID loaded from environment variables or `/home/pi/.device-radar.env`
 - Config fields: `telegram_token_env`, `telegram_chat_id_env`
 
 ### ntfy.sh (secondary)
@@ -167,7 +167,7 @@ Three services:
 |---|---|---|
 | `bt-scanner` | `bt-scanner.service` | Background scanner |
 | `bt-web` | `bt-web.service` | Flask web dashboard |
-| `bt-telegram` | `bt-telegram.service` | Telegram bot (loads env from `/home/pi/.openclaw/.env`) |
+| `bt-telegram` | `bt-telegram.service` | Telegram bot (loads env from `/home/pi/.device-radar.env`) |
 
 ## Error Handling
 

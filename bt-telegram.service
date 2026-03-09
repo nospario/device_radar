@@ -10,7 +10,7 @@ WorkingDirectory=/opt/bt-monitor
 Restart=always
 RestartSec=10
 Environment=PYTHONUNBUFFERED=1
-EnvironmentFile=/home/pi/.openclaw/.env
+EnvironmentFile=/home/pi/.device-radar.env
 
 [Install]
 WantedBy=multi-user.target

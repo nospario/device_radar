@@ -89,7 +89,7 @@ The Telegram bot (`bt_telegram.py`) provides interactive presence queries and ge
 
 1. Create a bot via [@BotFather](https://t.me/BotFather) on Telegram and note the token
 2. Get your chat ID by messaging [@userinfobot](https://t.me/userinfobot)
-3. Add credentials to `/home/pi/.openclaw/.env`:
+3. Add credentials to `/home/pi/.device-radar.env`:
 
    ```
    TELEGRAM_BOT_TOKEN=your_bot_token_here
