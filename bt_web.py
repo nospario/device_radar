@@ -166,6 +166,8 @@ def api_update_device(mac: str):
         kwargs["is_hidden"] = bool(data["is_hidden"])
     if "is_notify" in data:
         kwargs["is_notify"] = bool(data["is_notify"])
+    if "is_welcome" in data:
+        kwargs["is_welcome"] = bool(data["is_welcome"])
 
     updated = bt_db.update_device(conn, mac, **kwargs)
     conn.close()

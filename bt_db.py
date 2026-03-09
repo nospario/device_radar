@@ -87,6 +87,7 @@ def init_db(db_path: str | Path = DEFAULT_DB_PATH) -> None:
     _add_column(conn, "devices", "is_notify", "INTEGER DEFAULT 0")
     _add_column(conn, "devices", "ip_address", "TEXT")
     _add_column(conn, "devices", "linked_to", "TEXT")
+    _add_column(conn, "devices", "is_welcome", "INTEGER DEFAULT 0")
 
     conn.execute("CREATE INDEX IF NOT EXISTS idx_devices_linked_to ON devices(linked_to)")
 
@@ -218,6 +219,7 @@ def update_device(
     is_hidden: bool | None = None,
     is_paired: bool | None = None,
     is_notify: bool | None = None,
+    is_welcome: bool | None = None,
     state: str | None = None,
     last_seen: float | None = None,
 ) -> bool:
@@ -243,6 +245,9 @@ def update_device(
     if is_notify is not None:
         sets.append("is_notify = ?")
         params.append(int(is_notify))
+    if is_welcome is not None:
+        sets.append("is_welcome = ?")
+        params.append(int(is_welcome))
     if state is not None:
         sets.append("state = ?")
         params.append(state)

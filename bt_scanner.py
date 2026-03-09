@@ -20,6 +20,7 @@ from bleak import BleakScanner
 from bleak.backends.device import BLEDevice
 from bleak.backends.scanner import AdvertisementData
 
+import bt_alexa
 import bt_classify
 import bt_db
 import bt_pair
@@ -404,6 +405,9 @@ class BluetoothRadarScanner:
         primary's name — and only if no other group member was already HOME.
         """
         notified_groups: set[str] = set()  # primary MACs already notified
+        welcomed_groups: set[str] = set()  # primary MACs already welcomed
+
+        alexa_enabled = self.config.get("alexa_enabled", False)
 
         for mac in seen_macs:
             prev = prev_states.get(mac)
@@ -456,8 +460,27 @@ class BluetoothRadarScanner:
                 notified_groups.add(primary_mac)
                 notify_name = primary["friendly_name"] or primary["advertised_name"] or primary_mac
                 await bt_telegram.send_notification(notify_name, "arrived")
+
+                # Alexa welcome announcement (group-aware)
+                if alexa_enabled and primary_mac not in welcomed_groups:
+                    group_welcome = any(m.get("is_welcome") for m in all_members)
+                    if group_welcome:
+                        welcomed_groups.add(primary_mac)
+                        asyncio.create_task(
+                            bt_alexa.announce_arrival(
+                                notify_name, primary_mac, self.config, self.db_path,
+                            )
+                        )
             elif dev["is_notify"]:
                 await bt_telegram.send_notification(dev_name, "arrived")
+
+                # Alexa welcome announcement (standalone device)
+                if alexa_enabled and dev.get("is_welcome"):
+                    asyncio.create_task(
+                        bt_alexa.announce_arrival(
+                            dev_name, mac, self.config, self.db_path,
+                        )
+                    )
 
     async def _check_departures(
         self, conn: sqlite3.Connection, seen_macs: set[str], now: float

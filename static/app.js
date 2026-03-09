@@ -433,6 +433,7 @@ function initDevicePage(mac) {
                     device_type: deviceType,
                     is_watchlisted: document.getElementById('is-watchlisted').checked,
                     is_notify: document.getElementById('is-notify').checked,
+                    is_welcome: document.getElementById('is-welcome').checked,
                     is_hidden: document.getElementById('is-hidden').checked,
                 }),
             });
