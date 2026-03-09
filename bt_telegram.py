@@ -488,6 +488,16 @@ def main() -> None:
     app.add_handler(CommandHandler("lastseen", _cmd_lastseen))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, _handle_message))
 
+    # Register bot commands with Telegram so they appear in the / menu
+    async def _post_init(application) -> None:
+        from telegram import BotCommand
+        await application.bot.set_my_commands([
+            BotCommand("home", "Who is home right now"),
+            BotCommand("devices", "List all watched devices with status"),
+            BotCommand("lastseen", "When a device was last seen"),
+        ])
+
+    app.post_init = _post_init
     app.run_polling(allowed_updates=["message"])
 
 
