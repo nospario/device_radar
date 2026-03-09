@@ -175,6 +175,33 @@ def api_update_device(mac: str):
     return jsonify({"ok": True})
 
 
+@app.route("/api/devices/present")
+def api_devices_present():
+    """Return only devices currently detected as present."""
+    conn = get_conn()
+    devices = bt_db.get_all_devices_merged(conn, state="DETECTED", include_hidden=False)
+    conn.close()
+    return jsonify(devices)
+
+
+@app.route("/api/device/<path:device_id>/notifications", methods=["POST"])
+def api_device_notifications(device_id: str):
+    """Toggle notifications on or off for a specific device."""
+    conn = get_conn()
+    data = request.get_json()
+    if not data or "enabled" not in data:
+        conn.close()
+        return jsonify({"error": "enabled field required"}), 400
+
+    enabled = bool(data["enabled"])
+    updated = bt_db.update_device(conn, device_id, is_notify=enabled)
+    conn.close()
+
+    if not updated:
+        return jsonify({"error": "not found"}), 404
+    return jsonify({"id": device_id.upper(), "notifications_enabled": enabled})
+
+
 @app.route("/api/events")
 def api_events():
     conn = get_conn()
