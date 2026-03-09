@@ -209,6 +209,7 @@
 async function loadEchoDevices() {
     try {
         const devices = await api('/api/echo-devices');
+        _echoDevices = devices;
         const container = document.getElementById('echo-devices-list');
 
         if (devices.length === 0) {
@@ -216,16 +217,16 @@ async function loadEchoDevices() {
             return;
         }
 
-        container.innerHTML = devices.map(d => `
-            <div class="echo-card" data-name="${escapeHtml(d.device_name)}">
+        container.innerHTML = devices.map((d, i) => `
+            <div class="echo-card" data-index="${i}">
                 <div class="echo-card-header">
                     <div>
                         <h3 style="display:inline;">${escapeHtml(d.device_name)}</h3>
                         ${d.alias ? `<span class="alias">(${escapeHtml(d.alias)})</span>` : ''}
                     </div>
                     <div class="echo-actions">
-                        <button class="btn btn-sm" onclick="saveEchoDevice('${escapeHtml(d.device_name)}')">Save</button>
-                        <button class="btn btn-sm btn-danger" onclick="deleteEchoDevice('${escapeHtml(d.device_name)}')">Remove</button>
+                        <button class="btn btn-sm" onclick="saveEchoDevice(${i})">Save</button>
+                        <button class="btn btn-sm btn-danger" onclick="deleteEchoDevice(${i})">Remove</button>
                     </div>
                 </div>
                 <div class="echo-card-body">
@@ -267,8 +268,12 @@ async function loadEchoDevices() {
     }
 }
 
-async function saveEchoDevice(name) {
-    const card = document.querySelector(`.echo-card[data-name="${name}"]`);
+let _echoDevices = [];
+
+async function saveEchoDevice(index) {
+    const name = _echoDevices[index]?.device_name;
+    if (!name) return;
+    const card = document.querySelector(`.echo-card[data-index="${index}"]`);
     if (!card) return;
 
     const data = {
@@ -291,7 +296,9 @@ async function saveEchoDevice(name) {
     }
 }
 
-async function deleteEchoDevice(name) {
+async function deleteEchoDevice(index) {
+    const name = _echoDevices[index]?.device_name;
+    if (!name) return;
     if (!confirm(`Remove ${name}?`)) return;
     try {
         await api(`/api/echo-devices/${encodeURIComponent(name)}`, { method: 'DELETE' });
