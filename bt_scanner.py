@@ -437,31 +437,26 @@ class BluetoothRadarScanner:
             primary = group["primary"]
             if primary and group["secondaries"]:
                 primary_mac = primary["mac_address"]
-                if primary_mac in notified_groups:
-                    continue  # already notified for this group
-
-                # Only consider notify-enabled members when deciding to suppress.
-                # Non-notifying members (e.g. WiFi devices always HOME) should
-                # not prevent notifications from firing.
                 all_members = [primary] + group["secondaries"]
-                other_was_home = any(
-                    prev_states.get(m["mac_address"]) == "DETECTED"
-                    for m in all_members
-                    if m["mac_address"] != mac and m.get("is_notify")
-                )
-                if other_was_home:
-                    continue  # group was already home, no notification
-
-                # Check if any group member has notifications enabled
-                group_notify = any(m.get("is_notify") for m in all_members)
-                if not group_notify:
-                    continue
-
-                notified_groups.add(primary_mac)
                 notify_name = primary["friendly_name"] or primary["advertised_name"] or primary_mac
-                await bt_telegram.send_notification(notify_name, "arrived")
 
-                # Alexa welcome announcement (group-aware)
+                if primary_mac not in notified_groups:
+                    # Only consider notify-enabled members when deciding to suppress.
+                    # Non-notifying members (e.g. WiFi devices always HOME) should
+                    # not prevent notifications from firing.
+                    other_was_home = any(
+                        prev_states.get(m["mac_address"]) == "DETECTED"
+                        for m in all_members
+                        if m["mac_address"] != mac and m.get("is_notify")
+                    )
+
+                    if not other_was_home:
+                        group_notify = any(m.get("is_notify") for m in all_members)
+                        if group_notify:
+                            notified_groups.add(primary_mac)
+                            await bt_telegram.send_notification(notify_name, "arrived")
+
+                # Alexa welcome announcement (group-aware, independent of notify)
                 if alexa_enabled and primary_mac not in welcomed_groups:
                     group_welcome = any(m.get("is_welcome") for m in all_members)
                     if group_welcome:
@@ -471,10 +466,12 @@ class BluetoothRadarScanner:
                                 notify_name, primary_mac, self.config, self.db_path,
                             )
                         )
-            elif dev["is_notify"]:
-                await bt_telegram.send_notification(dev_name, "arrived")
+            else:
+                # Standalone device (not in a link group)
+                if dev["is_notify"]:
+                    await bt_telegram.send_notification(dev_name, "arrived")
 
-                # Alexa welcome announcement (standalone device)
+                # Alexa welcome announcement (independent of notify)
                 if alexa_enabled and dev.get("is_welcome"):
                     asyncio.create_task(
                         bt_alexa.announce_arrival(
