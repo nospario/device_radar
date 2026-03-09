@@ -763,6 +763,92 @@ async def _cmd_watchlist(update, context) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Telegram bot handlers — Alexa commands
+# ---------------------------------------------------------------------------
+
+async def _cmd_say(update, context) -> None:
+    """Handle /say [device] <message> — speak on an Echo device."""
+    if not _is_authorized(update.effective_chat.id):
+        return
+
+    config = load_config()
+    if not config.get("alexa_enabled"):
+        await update.message.reply_text("Alexa integration is not enabled.")
+        return
+
+    if not context.args:
+        await update.message.reply_text(
+            "Usage: /say [device] <message>\n"
+            "Examples:\n"
+            "  /say Hello everyone\n"
+            "  /say kitchen Dinner is ready\n"
+            "  /say all Time for bed\n"
+            "\nUse /echoes to see available devices."
+        )
+        return
+
+    import bt_alexa
+
+    first_word = context.args[0].lower()
+    alias_keys = {k.lower() for k in config.get("alexa_devices", {})}
+
+    if first_word == "all":
+        message = " ".join(context.args[1:])
+        if not message:
+            await update.message.reply_text("Usage: /say all <message>")
+            return
+        target_display = "all devices"
+        success = await bt_alexa.speak(message, config, device="ALL")
+    elif first_word in alias_keys:
+        device_name = bt_alexa.resolve_device_alias(first_word, config)
+        message = " ".join(context.args[1:])
+        if not message:
+            await update.message.reply_text(f"Usage: /say {first_word} <message>")
+            return
+        target_display = f"{first_word} ({device_name})"
+        success = await bt_alexa.speak(message, config, device=device_name)
+    else:
+        message = " ".join(context.args)
+        default_device = config.get("alexa_device_name", "Laura's Echo")
+        target_display = default_device
+        success = await bt_alexa.speak(message, config)
+
+    if success:
+        await update.message.reply_text(f"Spoke on {target_display}: \"{message}\"")
+    else:
+        await update.message.reply_text(f"Failed to speak on {target_display}. Check logs.")
+
+
+async def _cmd_echoes(update, context) -> None:
+    """Handle /echoes — list available Echo devices and aliases."""
+    if not _is_authorized(update.effective_chat.id):
+        return
+
+    config = load_config()
+    if not config.get("alexa_enabled"):
+        await update.message.reply_text("Alexa integration is not enabled.")
+        return
+
+    alexa_devices = config.get("alexa_devices", {})
+    default_device = config.get("alexa_device_name", "Laura's Echo")
+
+    lines = []
+    if alexa_devices:
+        lines.append("Available devices:")
+        for alias, device in alexa_devices.items():
+            marker = " (default)" if device == default_device else ""
+            lines.append(f"  {alias} \u2192 {device}{marker}")
+    else:
+        lines.append("No device aliases configured.")
+
+    lines.append(f"\nDefault: {default_device}")
+    lines.append("\nUsage: /say <device> <message>")
+    lines.append("Use /say all <message> to speak on all devices.")
+
+    await update.message.reply_text("\n".join(lines))
+
+
+# ---------------------------------------------------------------------------
 # Telegram bot handlers — message router
 # ---------------------------------------------------------------------------
 
@@ -868,6 +954,8 @@ def main() -> None:
     app.add_handler(CommandHandler("today", _cmd_today))
     app.add_handler(CommandHandler("notify", _cmd_notify_toggle))
     app.add_handler(CommandHandler("find", _cmd_find))
+    app.add_handler(CommandHandler("say", _cmd_say))
+    app.add_handler(CommandHandler("echoes", _cmd_echoes))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, _handle_message))
 
     # Register bot commands with Telegram so they appear in the / menu
@@ -885,6 +973,8 @@ def main() -> None:
             BotCommand("today", "Today's events summary"),
             BotCommand("notify", "Toggle notifications (on/off name)"),
             BotCommand("find", "Detailed info about a device"),
+            BotCommand("say", "Speak a message on an Echo device"),
+            BotCommand("echoes", "List available Echo devices"),
         ])
 
     app.post_init = _post_init

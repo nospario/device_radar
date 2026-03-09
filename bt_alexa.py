@@ -162,10 +162,19 @@ async def _generate_greeting(
 # Alexa script execution
 # ---------------------------------------------------------------------------
 
-async def _speak(message: str, config: dict[str, Any]) -> bool:
-    """Execute alexa_remote_control.sh to speak a message on the configured Echo."""
+def resolve_device_alias(alias: str, config: dict[str, Any]) -> str | None:
+    """Resolve a short alias (e.g. 'kitchen') to an Echo device name."""
+    devices = config.get("alexa_devices", {})
+    for key, value in devices.items():
+        if key.lower() == alias.lower():
+            return value
+    return None
+
+
+async def speak(message: str, config: dict[str, Any], device: str | None = None) -> bool:
+    """Execute alexa_remote_control.sh to speak a message on an Echo device."""
     script_path = config.get("alexa_script_path", "/opt/bt-monitor/alexa_remote_control.sh")
-    device_name = config.get("alexa_device_name", "Laura's Echo")
+    device_name = device or config.get("alexa_device_name", "Laura's Echo")
     env_file = config.get("alexa_env_file", "/home/pi/.alexa-env")
 
     if not Path(script_path).exists():
@@ -251,7 +260,7 @@ async def announce_arrival(
     logger.info("Alexa announcement for %s: %s", person_name, greeting)
 
     # Speak on Echo
-    success = await _speak(greeting, config)
+    success = await speak(greeting, config)
     if success:
         logger.info("Alexa spoke greeting for %s", person_name)
     else:
@@ -295,7 +304,7 @@ if __name__ == "__main__":
 
         logger.info("Generated greeting: %s", greeting)
 
-        success = await _speak(greeting, config)
+        success = await speak(greeting, config)
         if success:
             logger.info("Test complete — greeting spoken on Alexa")
         else:
