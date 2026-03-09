@@ -214,7 +214,7 @@ Edit `config.json` in the same directory as the scripts:
 | Field | Default | Description |
 |---|---|---|
 | `ollama_url` | `http://localhost:11434` | Ollama API endpoint |
-| `ollama_model` | `qwen2.5:7b` | Model to use for chat responses |
+| `ollama_model` | `qwen2.5:1.5b` | Model to use for chat responses |
 | `ollama_timeout_seconds` | `15` | Timeout for Ollama requests (falls back to direct answer) |
 | `conversation_history_length` | `10` | Number of recent messages to include as context |
 | `system_prompt` | *(see config)* | System prompt sent to Ollama for general chat |

@@ -274,19 +274,45 @@ async def answer_presence(
 async def _ollama_chat(
     messages: list[dict[str, str]], config: dict[str, Any],
 ) -> str | None:
-    """Send a chat request to Ollama and return the response."""
-    url = f"{config.get('ollama_url', 'http://localhost:11434')}/api/chat"
+    """Send a chat request to Ollama via /api/generate.
+
+    Converts the messages list into a single prompt string since
+    /api/generate doesn't support multi-message chat format.
+    """
+    base_url = config.get("ollama_url", "http://localhost:11434")
     timeout = config.get("ollama_timeout_seconds", 15)
-    payload = {
-        "model": config.get("ollama_model", "qwen2.5:7b"),
-        "messages": messages,
+    model = config.get("ollama_model", "qwen2.5:1.5b")
+
+    # Build a single prompt from the message history
+    parts: list[str] = []
+    system_prompt = ""
+    for msg in messages:
+        role = msg["role"]
+        content = msg["content"]
+        if role == "system":
+            system_prompt = content
+        elif role == "user":
+            parts.append(f"User: {content}")
+        elif role == "assistant":
+            parts.append(f"Assistant: {content}")
+    parts.append("Assistant:")
+    prompt = "\n".join(parts)
+
+    payload: dict[str, Any] = {
+        "model": model,
+        "prompt": prompt,
         "stream": False,
     }
+    if system_prompt:
+        payload["system"] = system_prompt
+
     try:
         async with httpx.AsyncClient() as client:
-            resp = await client.post(url, json=payload, timeout=timeout)
+            resp = await client.post(
+                f"{base_url}/api/generate", json=payload, timeout=timeout,
+            )
             resp.raise_for_status()
-            return resp.json().get("message", {}).get("content", "").strip()
+            return resp.json().get("response", "").strip()
     except httpx.TimeoutException:
         logger.warning("Ollama timed out after %ds", timeout)
         return None
