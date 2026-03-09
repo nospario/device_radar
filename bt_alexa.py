@@ -271,50 +271,174 @@ async def announce_arrival(
 # Player state query
 # ---------------------------------------------------------------------------
 
+async def _get_alexa_env(config: dict[str, Any]) -> dict[str, str] | None:
+    """Load and validate Alexa environment variables."""
+    env_file = config.get("alexa_env_file", "/home/pi/.alexa-env")
+    env = _parse_env_file(env_file)
+    if not env.get("REFRESH_TOKEN"):
+        return None
+    return env
+
+
 async def query_player_state(
     device_name: str, config: dict[str, Any],
 ) -> str | None:
     """Query the current player state of an Echo device.
 
     Returns 'PLAYING', 'PAUSED', 'IDLE', or None on failure.
+    Checks both the media state API and Bluetooth A2DP connections,
+    since Spotify Connect reports IDLE via the media API but shows
+    as a connected A2DP-SOURCE device via Bluetooth.
     """
     script_path = config.get("alexa_script_path", "/opt/bt-monitor/alexa_remote_control.sh")
-    env_file = config.get("alexa_env_file", "/home/pi/.alexa-env")
 
     if not Path(script_path).exists():
         return None
 
-    env = _parse_env_file(env_file)
-    if not env.get("REFRESH_TOKEN"):
+    env = await _get_alexa_env(config)
+    if not env:
         return None
 
+    os_env = {**dict(__import__("os").environ), **env}
+
+    # First check the standard media state
     try:
         proc = await asyncio.wait_for(
             asyncio.create_subprocess_exec(
                 script_path, "-d", device_name, "-q",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                env={**dict(__import__("os").environ), **env},
+                env=os_env,
             ),
             timeout=30,
         )
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
         output = stdout.decode()
 
-        # Parse currentState from the media/state JSON block
         import json as _json
         for line in output.split("\n{"):
             block = "{" + line if not line.startswith("{") else line
             try:
                 data = _json.loads(block.strip())
-                if "currentState" in data:
-                    return data["currentState"]
+                if "currentState" in data and data["currentState"] == "PLAYING":
+                    return "PLAYING"
             except _json.JSONDecodeError:
                 continue
-        return "IDLE"
     except Exception as e:
-        logger.debug("Failed to query player state for %s: %s", device_name, e)
+        logger.debug("Failed to query media state for %s: %s", device_name, e)
+
+    # Fall back to Bluetooth check — Spotify Connect uses A2DP
+    try:
+        proc = await asyncio.wait_for(
+            asyncio.create_subprocess_exec(
+                script_path, "-d", device_name, "-b", "list",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=os_env,
+            ),
+            timeout=30,
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
+        # The -b list output doesn't show connection state directly,
+        # so we query the raw Bluetooth API instead.
+    except Exception:
+        pass
+
+    # Query raw Bluetooth API for connected A2DP devices
+    try:
+        serial = await _get_device_serial(device_name, config, os_env)
+        if serial:
+            is_streaming = await _check_bluetooth_streaming(serial, config, os_env)
+            if is_streaming:
+                return "PLAYING"
+    except Exception as e:
+        logger.debug("Failed to check Bluetooth for %s: %s", device_name, e)
+
+    return "IDLE"
+
+
+async def _get_device_serial(
+    device_name: str, config: dict[str, Any], env: dict[str, str],
+) -> str | None:
+    """Get the serial number for an Echo device from the cached device list."""
+    devlist = Path("/tmp/.alexa.devicelist.txt")
+    if not devlist.exists():
         return None
+    for line in devlist.read_text().splitlines():
+        if line.startswith(device_name + "="):
+            parts = line.split("=")
+            if len(parts) >= 3:
+                return parts[2]  # serial is the 3rd field
+    return None
+
+
+async def _check_bluetooth_streaming(
+    serial: str, config: dict[str, Any], env: dict[str, str],
+) -> bool:
+    """Check if an Echo has any Bluetooth A2DP device connected (audio streaming)."""
+    cookie_path = Path("/tmp/.alexa.cookie")
+    if not cookie_path.exists():
+        return False
+
+    alexa_host = env.get("ALEXA", "alexa.amazon.co.uk")
+    amazon_host = env.get("AMAZON", "amazon.co.uk")
+
+    # Read CSRF token from cookie file
+    csrf = ""
+    for line in cookie_path.read_text().splitlines():
+        if amazon_host in line and "csrf" in line:
+            parts = line.split()
+            if len(parts) >= 7:
+                csrf = parts[6]
+                break
+
+    if not csrf:
+        return False
+
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(
+                f"https://{alexa_host}/api/bluetooth?cached=false",
+                headers={
+                    "DNT": "1",
+                    "Connection": "keep-alive",
+                    "Content-Type": "application/json; charset=UTF-8",
+                    "Referer": f"https://alexa.{amazon_host}/spa/index.html",
+                    "Origin": f"https://alexa.{amazon_host}",
+                    "csrf": csrf,
+                },
+                cookies=_load_cookie_jar(cookie_path, amazon_host),
+                timeout=15,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+
+            for state in data.get("bluetoothStates", []):
+                if state.get("deviceSerialNumber") == serial:
+                    for device in state.get("pairedDeviceList", []):
+                        if device.get("connected") and "A2DP-SOURCE" in device.get("profiles", []):
+                            logger.debug(
+                                "Bluetooth audio active: %s connected",
+                                device.get("friendlyName"),
+                            )
+                            return True
+                    return False
+    except Exception as e:
+        logger.debug("Bluetooth API check failed: %s", e)
+
+    return False
+
+
+def _load_cookie_jar(cookie_path: Path, amazon_host: str) -> dict[str, str]:
+    """Parse Netscape cookie file into a dict for httpx."""
+    cookies: dict[str, str] = {}
+    for line in cookie_path.read_text().splitlines():
+        if line.startswith("#") or not line.strip():
+            continue
+        parts = line.split("\t")
+        if len(parts) >= 7:
+            cookies[parts[5]] = parts[6]
+    return cookies
 
 
 # ---------------------------------------------------------------------------
