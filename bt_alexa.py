@@ -133,10 +133,9 @@ async def _generate_greeting(
 
     prompt = (
         f"Generate a single sentence welcome home greeting for {person_name}. "
-        f"The current time is {current_time} on {today_str}.{away_context} "
+        f"Today is {today_str}.{away_context} "
         f"{calendar_context}"
         f"Keep it casual, warm, and under 30 words. "
-        f"You must mention the current time ({current_time}) in your greeting. "
         f"If calendar events are listed, mention at least one by name exactly as given. "
         f"Do not use emoji, hashtags, special characters, or quotation marks. "
         f"Just output the greeting, nothing else."
@@ -158,7 +157,8 @@ async def _generate_greeting(
             # Strip any quotes the model may have wrapped around the greeting
             greeting = greeting.strip('"').strip("'")
             if greeting:
-                return greeting
+                # Prepend current time so the LLM doesn't have to include it
+                return f"It's {current_time}. {greeting}"
     except httpx.TimeoutException:
         logger.warning("Ollama timed out generating greeting after %ds", timeout)
     except Exception as e:
@@ -313,10 +313,9 @@ async def generate_encouragement(
 
     full_prompt = (
         f"{prompt} "
-        f"The current time is {current_time} on {today_str}. "
+        f"Today is {today_str}. "
         f"{calendar_context}"
         f"Keep it to a single sentence, casual and friendly, under 30 words. "
-        f"You must mention the current time ({current_time}) in your message. "
         f"If calendar events are listed, mention at least one by name exactly as given. "
         f"Do not use emoji, hashtags, special characters, or quotation marks. "
         f"Vary the message each time. Just output the message, nothing else."
@@ -337,7 +336,8 @@ async def generate_encouragement(
             message = resp.json().get("response", "").strip()
             message = message.strip('"').strip("'")
             if message:
-                return message
+                # Prepend current time so the LLM doesn't have to include it
+                return f"It's {current_time}. {message}"
     except httpx.TimeoutException:
         logger.warning("Ollama timed out generating encouragement after %ds", timeout)
     except Exception as e:
