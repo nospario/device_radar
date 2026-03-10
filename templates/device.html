@@ -211,9 +211,20 @@
                               style="width:100%; background:var(--bg-secondary); color:var(--text-primary); border:1px solid var(--border-color); border-radius:6px; padding:0.5rem; font-family:inherit; font-size:0.9rem; resize:vertical;"
                               placeholder="e.g. Generate a fun fact about cats">{{ device.proximity_prompt or '' }}</textarea>
                 </div>
-                {% if calendar_names %}
+                <button type="submit" class="btn btn-primary">Save Proximity</button>
+                <span id="proximity-save-status" class="save-status"></span>
+            </form>
+        </div>
+        {% endif %}
+
+        {% if calendar_names %}
+        <div class="detail-card">
+            <h3>Calendar</h3>
+            <p class="text-dim" style="font-size:0.8rem; margin-bottom:0.75rem;">
+                Include events from selected calendars in Alexa messages for this device.
+            </p>
+            <form id="calendar-form" class="device-form">
                 <div class="form-group">
-                    <label>Calendars to include in messages</label>
                     <div id="calendar-checkboxes">
                         {% for cal_name in calendar_names %}
                         <label class="checkbox-label">
@@ -224,9 +235,8 @@
                         {% endfor %}
                     </div>
                 </div>
-                {% endif %}
-                <button type="submit" class="btn btn-primary">Save Proximity</button>
-                <span id="proximity-save-status" class="save-status"></span>
+                <button type="submit" class="btn btn-primary">Save Calendars</button>
+                <span id="calendar-save-status" class="save-status"></span>
             </form>
         </div>
         {% endif %}

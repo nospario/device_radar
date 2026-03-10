@@ -466,9 +466,6 @@ function initDevicePage(mac) {
             const pStatus = document.getElementById('proximity-save-status');
 
             try {
-                const calBoxes = document.querySelectorAll('#calendar-checkboxes input[type="checkbox"]');
-                const selectedCals = [...calBoxes].filter(cb => cb.checked).map(cb => cb.value);
-
                 await api(`/api/devices/${encodeURIComponent(mac)}`, {
                     method: 'PATCH',
                     headers: { 'Content-Type': 'application/json' },
@@ -478,7 +475,6 @@ function initDevicePage(mac) {
                         proximity_interval: parseInt(document.getElementById('proximity-interval').value) || 30,
                         proximity_alexa_device: document.getElementById('proximity-alexa-device').value,
                         proximity_prompt: document.getElementById('proximity-prompt').value,
-                        calendar_calendars: JSON.stringify(selectedCals),
                     }),
                 });
 
@@ -488,6 +484,35 @@ function initDevicePage(mac) {
                 pStatus.textContent = 'Error saving';
                 pStatus.style.color = 'var(--red)';
                 console.error('Failed to save proximity:', err);
+            }
+        });
+    }
+
+    // Calendar form
+    const calForm = document.getElementById('calendar-form');
+    if (calForm) {
+        calForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const cStatus = document.getElementById('calendar-save-status');
+
+            try {
+                const calBoxes = document.querySelectorAll('#calendar-checkboxes input[type="checkbox"]');
+                const selectedCals = [...calBoxes].filter(cb => cb.checked).map(cb => cb.value);
+
+                await api(`/api/devices/${encodeURIComponent(mac)}`, {
+                    method: 'PATCH',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        calendar_calendars: JSON.stringify(selectedCals),
+                    }),
+                });
+
+                cStatus.textContent = 'Saved!';
+                setTimeout(() => { cStatus.textContent = ''; }, 2000);
+            } catch (err) {
+                cStatus.textContent = 'Error saving';
+                cStatus.style.color = 'var(--red)';
+                console.error('Failed to save calendars:', err);
             }
         });
     }
