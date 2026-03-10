@@ -244,15 +244,6 @@ async function loadEchoDevices() {
                             <label>Interval (minutes)</label>
                             <input type="number" class="echo-interval" value="${d.encourage_interval}" min="1" max="1440">
                         </div>
-                        <div class="echo-field">
-                            <div class="echo-toggle">
-                                <label class="toggle-switch">
-                                    <input type="checkbox" class="echo-when-playing" ${d.encourage_when_playing ? 'checked' : ''}>
-                                    <span class="toggle-slider"></span>
-                                </label>
-                                <span style="font-size:0.85rem;">Only when playing music</span>
-                            </div>
-                        </div>
                     </div>
                     <div class="prompt-area">
                         <div class="echo-field">
@@ -279,7 +270,6 @@ async function saveEchoDevice(index) {
     const data = {
         encourage_enabled: card.querySelector('.echo-enabled').checked,
         encourage_interval: parseInt(card.querySelector('.echo-interval').value) || 30,
-        encourage_when_playing: card.querySelector('.echo-when-playing').checked,
         encourage_prompt: card.querySelector('.echo-prompt').value,
     };
 
