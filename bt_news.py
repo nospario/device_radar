@@ -142,6 +142,16 @@ async def refresh_feeds(
                     if not guid:
                         continue
 
+                    # Strip URL fragments — BBC appends version fragments
+                    # (e.g. #8, #0) causing the same story to appear as duplicates
+                    guid = guid.split("#")[0]
+                    # Further deduplicate: prefix with feed_key so the guid
+                    # is unique per-feed (same story in two feeds gets two rows,
+                    # but get_unread_headlines deduplicates by title)
+                    guid = f"{key}:{guid}"
+                    if not guid:
+                        continue
+
                     published = now
                     if pub_el is not None and pub_el.text:
                         try:
@@ -198,14 +208,15 @@ def get_unread_headlines(
     try:
         rows = conn.execute(
             f"""
-            SELECT h.id, h.title, h.feed_key, h.published
+            SELECT h.id, h.title, h.feed_key, MAX(h.published) as published
             FROM news_headlines h
             WHERE h.feed_key IN ({placeholders})
               AND h.id NOT IN (
                   SELECT nr.headline_id FROM news_read nr
                   WHERE nr.mac_address = ?
               )
-            ORDER BY h.published DESC
+            GROUP BY h.title
+            ORDER BY published DESC
             LIMIT ?
             """,
             [*feed_keys, mac.upper(), count],
@@ -220,18 +231,36 @@ def mark_headlines_read(
     headline_ids: list[int],
     db_path: Path,
 ) -> None:
-    """Mark headlines as read for this device."""
+    """Mark headlines as read for this device.
+
+    Also marks all other headline rows with the same title as read,
+    so duplicate entries across feeds don't resurface.
+    """
     if not headline_ids:
         return
 
     now = time.time()
+    mac_upper = mac.upper()
     conn = bt_db.get_connection(db_path)
     try:
-        for hid in headline_ids:
+        # Find all headline IDs that share a title with the ones being marked
+        placeholders = ",".join("?" for _ in headline_ids)
+        all_ids = conn.execute(
+            f"""
+            SELECT DISTINCT h2.id FROM news_headlines h2
+            WHERE h2.title IN (
+                SELECT h1.title FROM news_headlines h1
+                WHERE h1.id IN ({placeholders})
+            )
+            """,
+            headline_ids,
+        ).fetchall()
+
+        for row in all_ids:
             conn.execute(
                 "INSERT OR IGNORE INTO news_read "
                 "(mac_address, headline_id, read_at) VALUES (?, ?, ?)",
-                (mac.upper(), hid, now),
+                (mac_upper, row["id"], now),
             )
         conn.commit()
     finally:
