@@ -30,6 +30,7 @@ Supporting modules:
 | `bt_wifi.py` | WiFi/LAN device discovery via ping sweep + ARP table parsing; targeted ping confirmation |
 | `bt_alexa.py` | Alexa TTS via `alexa_remote_control.sh`, Ollama-generated welcome greetings, encouragement loop, and proximity-triggered messages |
 | `bt_calendar.py` | Apple Calendar (iCloud CalDAV) integration — event fetching, caching, and prompt context for proximity/welcome messages |
+| `bt_weather.py` | Current weather via Open-Meteo API — fetches temperature and conditions, caches in memory, provides formatted string for Alexa TTS prefix |
 
 ## Database
 
@@ -122,7 +123,10 @@ Presence queries use the REST API (`localhost:8080`) where possible and fall bac
   "calendar_url": "https://caldav.icloud.com",
   "calendar_username_env": "APPLE_ID_EMAIL",
   "calendar_password_env": "APPLE_ID_APP_PASSWORD",
-  "calendar_cache_minutes": 15
+  "calendar_cache_minutes": 15,
+  "weather_latitude": 52.93,
+  "weather_longitude": -1.13,
+  "weather_cache_minutes": 30
 }
 ```
 
@@ -175,6 +179,16 @@ Config keys in `config.json`:
 - `calendar_cache_minutes` — how long to cache calendar names and events in memory (default: 15)
 
 Available calendars are discovered automatically from the iCloud account via CalDAV and cached in memory. Per-device calendar selection is stored in the `calendar_calendars` column (JSON array of calendar names), configured via checkboxes in a dedicated Calendar card on the device detail page (visible for all device types). Events for today and tomorrow are fetched and cached in memory, keyed by calendar name set. CalDAV fetches are synchronous (caldav library) wrapped in `run_in_executor`. Credentials stored in `/home/pi/.device-radar.env` as `APPLE_ID_EMAIL` and `APPLE_ID_APP_PASSWORD` (app-specific password from Apple).
+
+## Weather Integration
+
+Current weather conditions from Open-Meteo (free, no API key) are prepended to all Alexa messages alongside the current time. Module: `bt_weather.py`.
+
+Config keys in `config.json`:
+- `weather_latitude` / `weather_longitude` — location coordinates for weather lookup (required)
+- `weather_cache_minutes` — how long to cache weather data (default: 30)
+
+Weather is fetched in parallel with Ollama calls using `asyncio.gather`. The result is a fixed prefix like "It's 11:30 AM, 10 degrees and partly cloudy." — no LLM involvement. Gracefully degrades to time-only prefix if the API is unavailable or coordinates not configured.
 
 ## WiFi Departure Confirmation
 
@@ -247,6 +261,7 @@ bt-monitor/
 ├── bt_classify.py         # Device classification logic
 ├── bt_pair.py             # Bluetooth pairing helper
 ├── bt_calendar.py         # Apple Calendar (iCloud CalDAV) integration
+├── bt_weather.py          # Current weather via Open-Meteo API
 ├── bt_wifi.py             # WiFi/LAN scanning module + targeted ping confirmation
 ├── config.json            # User configuration (gitignored)
 ├── bt_radar.db            # SQLite database (auto-created, gitignored)

@@ -16,6 +16,7 @@ import httpx
 
 import bt_calendar
 import bt_db
+import bt_weather
 
 logger = logging.getLogger("bt_alexa")
 
@@ -60,16 +61,6 @@ def _parse_env_file(path: str) -> dict[str, str]:
 # Ollama greeting generation
 # ---------------------------------------------------------------------------
 
-def _get_time_of_day() -> str:
-    """Return morning/afternoon/evening based on current hour."""
-    hour = datetime.now().hour
-    if hour < 12:
-        return "morning"
-    if hour < 18:
-        return "afternoon"
-    return "evening"
-
-
 def _format_duration(seconds: float) -> str:
     """Format a duration in seconds as a human-readable string."""
     if seconds < 60:
@@ -112,6 +103,15 @@ def _get_time_away(mac: str, db_path: Path) -> str | None:
     return None
 
 
+async def _build_prefix(config: dict[str, Any]) -> str:
+    """Build the spoken prefix with current time and weather."""
+    current_time = datetime.now().strftime("%-I:%M %p")
+    weather = await bt_weather.get_current_weather(config)
+    if weather:
+        return f"It's {current_time}, {weather}."
+    return f"It's {current_time}."
+
+
 async def _generate_greeting(
     person_name: str, time_away: str | None, config: dict[str, Any],
     calendar_context: str = "",
@@ -121,15 +121,12 @@ async def _generate_greeting(
     timeout = config.get("ollama_timeout_seconds", 15)
     model = config.get("alexa_ollama_model") or config.get("ollama_model", "qwen2.5:1.5b")
 
-    time_of_day = _get_time_of_day()
-
     away_context = ""
     if time_away:
         away_context = f" They have been away for {time_away}."
 
     now = datetime.now()
     today_str = now.strftime("%A %-d %B %Y")
-    current_time = now.strftime("%-I:%M %p")
 
     prompt = (
         f"Generate a single sentence welcome home greeting for {person_name}. "
@@ -148,17 +145,19 @@ async def _generate_greeting(
     }
 
     try:
+        # Fetch weather in parallel with Ollama call
         async with httpx.AsyncClient() as client:
-            resp = await client.post(
+            ollama_task = client.post(
                 f"{base_url}/api/generate", json=payload, timeout=timeout,
             )
+            prefix_task = _build_prefix(config)
+            resp, prefix = await asyncio.gather(ollama_task, prefix_task)
+
             resp.raise_for_status()
             greeting = resp.json().get("response", "").strip()
-            # Strip any quotes the model may have wrapped around the greeting
             greeting = greeting.strip('"').strip("'")
             if greeting:
-                # Prepend current time so the LLM doesn't have to include it
-                return f"It's {current_time}. {greeting}"
+                return f"{prefix} {greeting}"
     except httpx.TimeoutException:
         logger.warning("Ollama timed out generating greeting after %ds", timeout)
     except Exception as e:
@@ -306,10 +305,8 @@ async def generate_encouragement(
     timeout = config.get("ollama_timeout_seconds", 15)
     model = config.get("alexa_ollama_model") or config.get("ollama_model", "qwen2.5:1.5b")
 
-    time_of_day = _get_time_of_day()
     now = datetime.now()
     today_str = now.strftime("%A %-d %B %Y")
-    current_time = now.strftime("%-I:%M %p")
 
     full_prompt = (
         f"{prompt} "
@@ -328,16 +325,19 @@ async def generate_encouragement(
     }
 
     try:
+        # Fetch weather in parallel with Ollama call
         async with httpx.AsyncClient() as client:
-            resp = await client.post(
+            ollama_task = client.post(
                 f"{base_url}/api/generate", json=payload, timeout=timeout,
             )
+            prefix_task = _build_prefix(config)
+            resp, prefix = await asyncio.gather(ollama_task, prefix_task)
+
             resp.raise_for_status()
             message = resp.json().get("response", "").strip()
             message = message.strip('"').strip("'")
             if message:
-                # Prepend current time so the LLM doesn't have to include it
-                return f"It's {current_time}. {message}"
+                return f"{prefix} {message}"
     except httpx.TimeoutException:
         logger.warning("Ollama timed out generating encouragement after %ds", timeout)
     except Exception as e:
