@@ -103,6 +103,9 @@ def init_db(db_path: str | Path = DEFAULT_DB_PATH) -> None:
     # News feed integration
     _add_column(conn, "devices", "news_feeds", "TEXT DEFAULT ''")
 
+    # Alexa voice (SSML Polly voice name)
+    _add_column(conn, "devices", "alexa_voice", "TEXT DEFAULT ''")
+
     conn.execute("CREATE INDEX IF NOT EXISTS idx_devices_linked_to ON devices(linked_to)")
 
     # Chat history for Telegram bot conversations
@@ -281,6 +284,7 @@ def update_device(
     last_proximity_message: float | None = None,
     calendar_calendars: str | None = None,
     news_feeds: str | None = None,
+    alexa_voice: str | None = None,
 ) -> bool:
     """Update specific fields on a device. Returns True if a row was updated."""
     sets: list[str] = []
@@ -337,6 +341,9 @@ def update_device(
     if news_feeds is not None:
         sets.append("news_feeds = ?")
         params.append(news_feeds)
+    if alexa_voice is not None:
+        sets.append("alexa_voice = ?")
+        params.append(alexa_voice)
 
     if not sets:
         return False

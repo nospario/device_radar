@@ -179,8 +179,15 @@ def resolve_device_alias(alias: str, config: dict[str, Any]) -> str | None:
     return None
 
 
-async def speak(message: str, config: dict[str, Any], device: str | None = None) -> bool:
-    """Execute alexa_remote_control.sh to speak a message on an Echo device."""
+async def speak(
+    message: str, config: dict[str, Any],
+    device: str | None = None, voice: str | None = None,
+) -> bool:
+    """Execute alexa_remote_control.sh to speak a message on an Echo device.
+
+    If ``voice`` is set to an Amazon Polly voice name (e.g. "Brian"),
+    the message is wrapped in SSML ``<voice>`` tags.
+    """
     script_path = config.get("alexa_script_path", "/opt/bt-monitor/alexa_remote_control.sh")
     device_name = device or config.get("alexa_device_name", "Laura's Echo")
     env_file = config.get("alexa_env_file", "/home/pi/.alexa-env")
@@ -194,6 +201,10 @@ async def speak(message: str, config: dict[str, Any], device: str | None = None)
     if not env.get("REFRESH_TOKEN"):
         logger.error("REFRESH_TOKEN not found in %s", env_file)
         return False
+
+    # Wrap in SSML voice tags if a Polly voice is specified
+    if voice:
+        message = f"<speak><voice name='{voice}'>{message}</voice></speak>"
 
     try:
         proc = await asyncio.wait_for(
@@ -289,8 +300,9 @@ async def announce_arrival(
 
     logger.info("Alexa announcement for %s: %s", person_name, greeting)
 
-    # Speak on Echo
-    success = await speak(greeting, config)
+    # Speak on Echo (use device's configured voice if set)
+    voice = device.get("alexa_voice") if device else None
+    success = await speak(greeting, config, voice=voice or None)
     if success:
         logger.info("Alexa spoke greeting for %s", person_name)
     else:
@@ -483,8 +495,9 @@ async def check_proximity_devices(config: dict[str, Any], db_path: Path) -> None
         echo_device = dev.get("proximity_alexa_device") or config.get("alexa_device_name")
 
         dev_name = dev["friendly_name"] or dev["advertised_name"] or mac
+        voice = dev.get("alexa_voice") or None
         logger.info("Proximity message for %s (RSSI %s): %s", dev_name, rssi, message)
-        success = await speak(message, config, device=echo_device)
+        success = await speak(message, config, device=echo_device, voice=voice)
 
         if success:
             conn = bt_db.get_connection(db_path)

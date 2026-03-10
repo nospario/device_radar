@@ -161,6 +161,22 @@
                         Hidden (hide from dashboard)
                     </label>
                 </div>
+                <div class="form-group">
+                    <label for="alexa-voice">Alexa Voice</label>
+                    <select id="alexa-voice">
+                        <option value="" {% if not device.alexa_voice %}selected{% endif %}>Default (Alexa)</option>
+                        {% for v in [
+                            ('Brian', 'Brian (British male)'),
+                            ('Amy', 'Amy (British female)'),
+                            ('Emma', 'Emma (British female)'),
+                            ('Matthew', 'Matthew (US male)'),
+                            ('Joanna', 'Joanna (US female)'),
+                            ('Kendra', 'Kendra (US female)'),
+                        ] %}
+                        <option value="{{ v[0] }}" {% if device.alexa_voice == v[0] %}selected{% endif %}>{{ v[1] }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
                 <button type="submit" class="btn btn-primary">Save</button>
                 <span id="save-status" class="save-status"></span>
             </form>

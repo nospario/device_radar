@@ -210,6 +210,8 @@ def api_update_device(mac: str):
         kwargs["calendar_calendars"] = data["calendar_calendars"]
     if "news_feeds" in data:
         kwargs["news_feeds"] = data["news_feeds"]
+    if "alexa_voice" in data:
+        kwargs["alexa_voice"] = data["alexa_voice"]
 
     updated = bt_db.update_device(conn, mac, **kwargs)
     conn.close()

@@ -435,6 +435,7 @@ function initDevicePage(mac) {
                     is_notify: document.getElementById('is-notify').checked,
                     is_welcome: document.getElementById('is-welcome').checked,
                     is_hidden: document.getElementById('is-hidden').checked,
+                    alexa_voice: document.getElementById('alexa-voice').value,
                 }),
             });
 
