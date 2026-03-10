@@ -134,6 +134,7 @@ async def _generate_greeting(
         f"It is {time_of_day} on {today_str}.{away_context} "
         f"{calendar_context}"
         f"Keep it casual, warm, and under 30 words. "
+        f"If calendar events are listed, mention at least one by name exactly as given. "
         f"Do not use emoji, hashtags, special characters, or quotation marks. "
         f"Just output the greeting, nothing else."
     )
@@ -310,6 +311,7 @@ async def generate_encouragement(
         f"It is {time_of_day} on {today_str}. "
         f"{calendar_context}"
         f"Keep it to a single sentence, casual and friendly, under 30 words. "
+        f"If calendar events are listed, mention at least one by name exactly as given. "
         f"Do not use emoji, hashtags, special characters, or quotation marks. "
         f"Vary the message each time. Just output the message, nothing else."
     )
