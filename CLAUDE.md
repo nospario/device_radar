@@ -31,13 +31,16 @@ Supporting modules:
 | `bt_alexa.py` | Alexa TTS via `alexa_remote_control.sh`, Ollama-generated welcome greetings, encouragement loop, and proximity-triggered messages |
 | `bt_calendar.py` | Apple Calendar (iCloud CalDAV) integration — event fetching, caching, and prompt context for proximity/welcome messages |
 | `bt_weather.py` | Current weather via Open-Meteo API — fetches temperature and conditions, caches in memory, provides formatted string for Alexa TTS prefix |
+| `bt_news.py` | BBC News RSS headline fetching, per-device read tracking, and spoken suffix formatting for Alexa TTS |
 
 ## Database
 
 SQLite with WAL mode (`bt_radar.db`). Core tables:
 
-- **devices** — all known devices with state (`DETECTED`/`LOST`), scan info, flags (`is_watchlisted`, `is_notify`, `is_hidden`, `is_paired`), device linking (`linked_to`), proximity alert settings (`proximity_enabled`, `proximity_rssi_threshold`, `proximity_interval`, `proximity_alexa_device`, `proximity_prompt`, `last_proximity_message`), and calendar integration (`calendar_calendars` — JSON array of calendar names)
+- **devices** — all known devices with state (`DETECTED`/`LOST`), scan info, flags (`is_watchlisted`, `is_notify`, `is_hidden`, `is_paired`), device linking (`linked_to`), proximity alert settings (`proximity_enabled`, `proximity_rssi_threshold`, `proximity_interval`, `proximity_alexa_device`, `proximity_prompt`, `last_proximity_message`), calendar integration (`calendar_calendars` — JSON array of calendar names), and news feed selection (`news_feeds` — JSON array of feed keys)
 - **events** — arrival/departure event log with timestamps
+- **news_headlines** — fetched BBC RSS headlines with guid deduplication, feed_key, title, published timestamp
+- **news_read** — per-device read tracking (mac_address + headline_id), ensures headlines aren't repeated
 - **chat_history** — Telegram bot conversation history for Ollama context
 - **migrations** — tracks one-time data migrations
 
@@ -126,7 +129,10 @@ Presence queries use the REST API (`localhost:8080`) where possible and fall bac
   "calendar_cache_minutes": 15,
   "weather_latitude": 52.93,
   "weather_longitude": -1.13,
-  "weather_cache_minutes": 30
+  "weather_cache_minutes": 30,
+  "news_enabled": true,
+  "news_headline_count": 3,
+  "news_cache_minutes": 15
 }
 ```
 
@@ -141,7 +147,7 @@ Flask app on port 8080 with dark theme.
 
 ### Pages
 - **Dashboard** (`/`) — live device list with stats, filters, watchlist/notify toggles
-- **Device Detail** (`/device/<mac>`) — info, settings, linking, event history, proximity Alexa config (BLE devices only), calendar selection (all devices)
+- **Device Detail** (`/device/<mac>`) — info, settings, linking, event history, proximity Alexa config (BLE devices only), calendar selection, BBC News feed selection (all devices)
 - **History** (`/history`) — filterable paginated event log
 - **Pairing** (`/pairing`) — pair/unpair via web UI
 
@@ -189,6 +195,17 @@ Config keys in `config.json`:
 - `weather_cache_minutes` — how long to cache weather data (default: 30)
 
 Weather is fetched in parallel with Ollama calls using `asyncio.gather`. The result is a fixed prefix like "It's 11:30 AM, 10 degrees and partly cloudy." — no LLM involvement. Gracefully degrades to time-only prefix if the API is unavailable or coordinates not configured.
+
+## News Headlines
+
+BBC News RSS headlines appended to all Alexa messages (arrival greetings and proximity alerts) as fixed spoken text. Module: `bt_news.py`.
+
+Config keys in `config.json`:
+- `news_enabled` — toggle on/off (default: true)
+- `news_headline_count` — how many headlines per alert (default: 3)
+- `news_cache_minutes` — how often to re-fetch each RSS feed (default: 15)
+
+19 BBC RSS feeds are hardcoded in `bt_news.BBC_FEEDS` (Top Stories, UK, World, Business, Politics, Technology, Science, Health, Education, Entertainment, England, Sport, Football, Cricket, F1, Rugby Union, Tennis, Golf, Nottm Forest). Per-device feed selection is stored in the `news_feeds` column (JSON array of feed keys), configured via grouped checkboxes on the device detail page. Headlines are stored in `news_headlines` table with guid deduplication. Per-device read tracking via `news_read` table ensures headlines aren't repeated — one device hearing a headline does not mark it as read for other devices. Headlines older than 7 days are automatically pruned. Feeds are refreshed before each alert to catch breaking news.
 
 ## WiFi Departure Confirmation
 
@@ -262,6 +279,7 @@ bt-monitor/
 ├── bt_pair.py             # Bluetooth pairing helper
 ├── bt_calendar.py         # Apple Calendar (iCloud CalDAV) integration
 ├── bt_weather.py          # Current weather via Open-Meteo API
+├── bt_news.py             # BBC News RSS headline integration
 ├── bt_wifi.py             # WiFi/LAN scanning module + targeted ping confirmation
 ├── config.json            # User configuration (gitignored)
 ├── bt_radar.db            # SQLite database (auto-created, gitignored)

@@ -240,6 +240,43 @@
             </form>
         </div>
         {% endif %}
+
+        {% if news_feeds %}
+        <div class="detail-card">
+            <h3>BBC News</h3>
+            <p class="text-dim" style="font-size:0.8rem; margin-bottom:0.75rem;">
+                Include headlines from selected BBC feeds in Alexa messages for this device.
+            </p>
+            <form id="news-form" class="device-form">
+                <div class="form-group">
+                    <div id="news-checkboxes">
+                        <p class="text-dim" style="font-size:0.75rem; margin-bottom:0.5rem; font-weight:600; text-transform:uppercase; letter-spacing:0.05em;">News</p>
+                        {% for feed in news_feeds %}
+                            {% if feed.category == 'news' %}
+                            <label class="checkbox-label">
+                                <input type="checkbox" name="news_feed" value="{{ feed.key }}"
+                                       {% if feed.key in device_news_feeds %}checked{% endif %}>
+                                {{ feed.name }}
+                            </label>
+                            {% endif %}
+                        {% endfor %}
+                        <p class="text-dim" style="font-size:0.75rem; margin-top:0.75rem; margin-bottom:0.5rem; font-weight:600; text-transform:uppercase; letter-spacing:0.05em;">Sport</p>
+                        {% for feed in news_feeds %}
+                            {% if feed.category == 'sport' %}
+                            <label class="checkbox-label">
+                                <input type="checkbox" name="news_feed" value="{{ feed.key }}"
+                                       {% if feed.key in device_news_feeds %}checked{% endif %}>
+                                {{ feed.name }}
+                            </label>
+                            {% endif %}
+                        {% endfor %}
+                    </div>
+                </div>
+                <button type="submit" class="btn btn-primary">Save News Feeds</button>
+                <span id="news-save-status" class="save-status"></span>
+            </form>
+        </div>
+        {% endif %}
     </div>
 
     <div class="section">

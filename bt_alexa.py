@@ -16,6 +16,7 @@ import httpx
 
 import bt_calendar
 import bt_db
+import bt_news
 import bt_weather
 
 logger = logging.getLogger("bt_alexa")
@@ -277,6 +278,15 @@ async def announce_arrival(
         greeting = f"Welcome home {person_name}"
         logger.info("Using fallback greeting for %s", person_name)
 
+    # Append news headlines
+    if device:
+        try:
+            news_suffix = await bt_news.get_device_news_suffix(device, config, db_path)
+            if news_suffix:
+                greeting = f"{greeting} {news_suffix}"
+        except Exception:
+            logger.debug("News suffix failed for greeting", exc_info=True)
+
     logger.info("Alexa announcement for %s: %s", person_name, greeting)
 
     # Speak on Echo
@@ -460,6 +470,14 @@ async def check_proximity_devices(config: dict[str, Any], db_path: Path) -> None
             dev_name = dev["friendly_name"] or dev["advertised_name"] or mac
             logger.warning("Failed to generate proximity message for %s", dev_name)
             continue
+
+        # Append news headlines
+        try:
+            news_suffix = await bt_news.get_device_news_suffix(dev, config, db_path)
+            if news_suffix:
+                message = f"{message} {news_suffix}"
+        except Exception:
+            logger.debug("News suffix failed for proximity %s", mac, exc_info=True)
 
         # Determine which Echo to speak through
         echo_device = dev.get("proximity_alexa_device") or config.get("alexa_device_name")

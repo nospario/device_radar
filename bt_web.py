@@ -13,6 +13,7 @@ from flask import Flask, jsonify, render_template, request
 
 import bt_calendar
 import bt_db
+import bt_news
 import bt_pair
 
 logger = logging.getLogger("bt_web")
@@ -98,11 +99,18 @@ def device_detail(mac: str):
     except (json.JSONDecodeError, TypeError):
         device_calendars = []
 
+    news_feeds = bt_news.get_available_feeds()
+    try:
+        device_news_feeds = json.loads(device.get("news_feeds") or "[]")
+    except (json.JSONDecodeError, TypeError):
+        device_news_feeds = []
+
     return render_template(
         "device.html", device=device, events=events,
         link_group=link_group, linkable=linkable,
         custom_types=custom_types, echo_devices=echo_devices,
         calendar_names=calendar_names, device_calendars=device_calendars,
+        news_feeds=news_feeds, device_news_feeds=device_news_feeds,
         active="",
     )
 
@@ -200,6 +208,8 @@ def api_update_device(mac: str):
         kwargs["proximity_prompt"] = data["proximity_prompt"]
     if "calendar_calendars" in data:
         kwargs["calendar_calendars"] = data["calendar_calendars"]
+    if "news_feeds" in data:
+        kwargs["news_feeds"] = data["news_feeds"]
 
     updated = bt_db.update_device(conn, mac, **kwargs)
     conn.close()

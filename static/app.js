@@ -516,6 +516,35 @@ function initDevicePage(mac) {
             }
         });
     }
+
+    // News feeds form
+    const newsForm = document.getElementById('news-form');
+    if (newsForm) {
+        newsForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const nStatus = document.getElementById('news-save-status');
+
+            try {
+                const newsBoxes = document.querySelectorAll('#news-checkboxes input[type="checkbox"]');
+                const selectedFeeds = [...newsBoxes].filter(cb => cb.checked).map(cb => cb.value);
+
+                await api(`/api/devices/${encodeURIComponent(mac)}`, {
+                    method: 'PATCH',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        news_feeds: JSON.stringify(selectedFeeds),
+                    }),
+                });
+
+                nStatus.textContent = 'Saved!';
+                setTimeout(() => { nStatus.textContent = ''; }, 2000);
+            } catch (err) {
+                nStatus.textContent = 'Error saving';
+                nStatus.style.color = 'var(--red)';
+                console.error('Failed to save news feeds:', err);
+            }
+        });
+    }
 }
 
 // -- History --

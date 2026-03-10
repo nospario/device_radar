@@ -100,6 +100,9 @@ def init_db(db_path: str | Path = DEFAULT_DB_PATH) -> None:
     # Calendar integration
     _add_column(conn, "devices", "calendar_calendars", "TEXT DEFAULT ''")
 
+    # News feed integration
+    _add_column(conn, "devices", "news_feeds", "TEXT DEFAULT ''")
+
     conn.execute("CREATE INDEX IF NOT EXISTS idx_devices_linked_to ON devices(linked_to)")
 
     # Chat history for Telegram bot conversations
@@ -126,6 +129,30 @@ def init_db(db_path: str | Path = DEFAULT_DB_PATH) -> None:
             encourage_when_playing INTEGER DEFAULT 1,
             last_encouraged       REAL DEFAULT 0
         );
+    """)
+
+    # News headlines and per-device read tracking
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS news_headlines (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            guid       TEXT NOT NULL UNIQUE,
+            feed_key   TEXT NOT NULL,
+            title      TEXT NOT NULL,
+            published  REAL NOT NULL,
+            fetched_at REAL NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_news_feed
+            ON news_headlines(feed_key, published DESC);
+
+        CREATE TABLE IF NOT EXISTS news_read (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            mac_address  TEXT NOT NULL,
+            headline_id  INTEGER NOT NULL,
+            read_at      REAL NOT NULL,
+            UNIQUE(mac_address, headline_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_news_read_mac
+            ON news_read(mac_address, headline_id);
     """)
 
     # One-time data migrations (tracked so they never re-run)
@@ -253,6 +280,7 @@ def update_device(
     proximity_prompt: str | None = None,
     last_proximity_message: float | None = None,
     calendar_calendars: str | None = None,
+    news_feeds: str | None = None,
 ) -> bool:
     """Update specific fields on a device. Returns True if a row was updated."""
     sets: list[str] = []
@@ -306,6 +334,9 @@ def update_device(
     if calendar_calendars is not None:
         sets.append("calendar_calendars = ?")
         params.append(calendar_calendars)
+    if news_feeds is not None:
+        sets.append("news_feeds = ?")
+        params.append(news_feeds)
 
     if not sets:
         return False
