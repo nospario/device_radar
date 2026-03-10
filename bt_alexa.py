@@ -133,9 +133,10 @@ async def _generate_greeting(
 
     prompt = (
         f"Generate a single sentence welcome home greeting for {person_name}. "
-        f"It is {current_time} on {today_str}.{away_context} "
+        f"The current time is {current_time} on {today_str}.{away_context} "
         f"{calendar_context}"
         f"Keep it casual, warm, and under 30 words. "
+        f"You must mention the current time ({current_time}) in your greeting. "
         f"If calendar events are listed, mention at least one by name exactly as given. "
         f"Do not use emoji, hashtags, special characters, or quotation marks. "
         f"Just output the greeting, nothing else."
@@ -312,9 +313,10 @@ async def generate_encouragement(
 
     full_prompt = (
         f"{prompt} "
-        f"It is {current_time} on {today_str}. "
+        f"The current time is {current_time} on {today_str}. "
         f"{calendar_context}"
         f"Keep it to a single sentence, casual and friendly, under 30 words. "
+        f"You must mention the current time ({current_time}) in your message. "
         f"If calendar events are listed, mention at least one by name exactly as given. "
         f"Do not use emoji, hashtags, special characters, or quotation marks. "
         f"Vary the message each time. Just output the message, nothing else."
