@@ -14,6 +14,7 @@ from typing import Any
 
 import httpx
 
+import bt_calendar
 import bt_db
 
 logger = logging.getLogger("bt_alexa")
@@ -113,6 +114,7 @@ def _get_time_away(mac: str, db_path: Path) -> str | None:
 
 async def _generate_greeting(
     person_name: str, time_away: str | None, config: dict[str, Any],
+    calendar_context: str = "",
 ) -> str | None:
     """Generate a welcome greeting via Ollama."""
     base_url = config.get("ollama_url", "http://localhost:11434")
@@ -129,6 +131,7 @@ async def _generate_greeting(
     prompt = (
         f"Generate a single sentence welcome home greeting for {person_name}. "
         f"It is {time_of_day} on {day_of_week}.{away_context} "
+        f"{calendar_context}"
         f"Keep it casual, warm, and under 30 words. "
         f"Do not use emoji, hashtags, special characters, or quotation marks. "
         f"Just output the greeting, nothing else."
@@ -251,8 +254,21 @@ async def announce_arrival(
     # Get time away
     time_away = _get_time_away(mac, db_path)
 
+    # Get calendar context for this device
+    calendar_context = ""
+    try:
+        conn = bt_db.get_connection(db_path)
+        device = bt_db.get_device(conn, mac)
+        conn.close()
+        if device:
+            calendar_context = await bt_calendar.get_device_calendar_context(
+                device, config,
+            )
+    except Exception:
+        logger.debug("Calendar context fetch failed for greeting", exc_info=True)
+
     # Generate greeting via Ollama
-    greeting = await _generate_greeting(person_name, time_away, config)
+    greeting = await _generate_greeting(person_name, time_away, config, calendar_context=calendar_context)
     if not greeting:
         greeting = f"Welcome home {person_name}"
         logger.info("Using fallback greeting for %s", person_name)
@@ -277,7 +293,9 @@ async def announce_arrival(
 # Encourage mode
 # ---------------------------------------------------------------------------
 
-async def generate_encouragement(prompt: str, config: dict[str, Any]) -> str | None:
+async def generate_encouragement(
+    prompt: str, config: dict[str, Any], calendar_context: str = "",
+) -> str | None:
     """Generate an encouraging message via Ollama."""
     base_url = config.get("ollama_url", "http://localhost:11434")
     timeout = config.get("ollama_timeout_seconds", 15)
@@ -289,6 +307,7 @@ async def generate_encouragement(prompt: str, config: dict[str, Any]) -> str | N
     full_prompt = (
         f"{prompt} "
         f"It is {time_of_day} on {day_of_week}. "
+        f"{calendar_context}"
         f"Keep it to a single sentence, casual and friendly, under 30 words. "
         f"Do not use emoji, hashtags, special characters, or quotation marks. "
         f"Vary the message each time. Just output the message, nothing else."
@@ -417,8 +436,17 @@ async def check_proximity_devices(config: dict[str, Any], db_path: Path) -> None
         if not prompt:
             continue
 
+        # Resolve calendar context for this device
+        calendar_context = ""
+        try:
+            calendar_context = await bt_calendar.get_device_calendar_context(
+                dev, config,
+            )
+        except Exception:
+            logger.debug("Calendar context fetch failed for %s", mac, exc_info=True)
+
         # Generate message via Ollama (reuse encouragement generator)
-        message = await generate_encouragement(prompt, config)
+        message = await generate_encouragement(prompt, config, calendar_context=calendar_context)
         if not message:
             dev_name = dev["friendly_name"] or dev["advertised_name"] or mac
             logger.warning("Failed to generate proximity message for %s", dev_name)

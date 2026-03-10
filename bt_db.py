@@ -97,6 +97,9 @@ def init_db(db_path: str | Path = DEFAULT_DB_PATH) -> None:
     _add_column(conn, "devices", "proximity_prompt", "TEXT DEFAULT ''")
     _add_column(conn, "devices", "last_proximity_message", "REAL DEFAULT 0")
 
+    # Calendar integration
+    _add_column(conn, "devices", "calendar_calendars", "TEXT DEFAULT ''")
+
     conn.execute("CREATE INDEX IF NOT EXISTS idx_devices_linked_to ON devices(linked_to)")
 
     # Chat history for Telegram bot conversations

@@ -466,6 +466,9 @@ function initDevicePage(mac) {
             const pStatus = document.getElementById('proximity-save-status');
 
             try {
+                const calBoxes = document.querySelectorAll('#calendar-checkboxes input[type="checkbox"]');
+                const selectedCals = [...calBoxes].filter(cb => cb.checked).map(cb => cb.value);
+
                 await api(`/api/devices/${encodeURIComponent(mac)}`, {
                     method: 'PATCH',
                     headers: { 'Content-Type': 'application/json' },
@@ -475,6 +478,7 @@ function initDevicePage(mac) {
                         proximity_interval: parseInt(document.getElementById('proximity-interval').value) || 30,
                         proximity_alexa_device: document.getElementById('proximity-alexa-device').value,
                         proximity_prompt: document.getElementById('proximity-prompt').value,
+                        calendar_calendars: JSON.stringify(selectedCals),
                     }),
                 });
 

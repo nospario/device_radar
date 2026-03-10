@@ -89,10 +89,20 @@ def device_detail(mac: str):
     echo_devices = bt_db.get_all_echo_devices(conn)
 
     conn.close()
+
+    config = load_config()
+    calendar_names = config.get("calendar_names", [])
+    try:
+        device_calendars = json.loads(device.get("calendar_calendars") or "[]")
+    except (json.JSONDecodeError, TypeError):
+        device_calendars = []
+
     return render_template(
         "device.html", device=device, events=events,
         link_group=link_group, linkable=linkable,
-        custom_types=custom_types, echo_devices=echo_devices, active="",
+        custom_types=custom_types, echo_devices=echo_devices,
+        calendar_names=calendar_names, device_calendars=device_calendars,
+        active="",
     )
 
 
@@ -187,6 +197,8 @@ def api_update_device(mac: str):
         kwargs["proximity_alexa_device"] = data["proximity_alexa_device"] or None
     if "proximity_prompt" in data:
         kwargs["proximity_prompt"] = data["proximity_prompt"]
+    if "calendar_calendars" in data:
+        kwargs["calendar_calendars"] = data["calendar_calendars"]
 
     updated = bt_db.update_device(conn, mac, **kwargs)
     conn.close()

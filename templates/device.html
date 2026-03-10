@@ -211,6 +211,20 @@
                               style="width:100%; background:var(--bg-secondary); color:var(--text-primary); border:1px solid var(--border-color); border-radius:6px; padding:0.5rem; font-family:inherit; font-size:0.9rem; resize:vertical;"
                               placeholder="e.g. Generate a fun fact about cats">{{ device.proximity_prompt or '' }}</textarea>
                 </div>
+                {% if calendar_names %}
+                <div class="form-group">
+                    <label>Calendars to include in messages</label>
+                    <div id="calendar-checkboxes">
+                        {% for cal_name in calendar_names %}
+                        <label class="checkbox-label">
+                            <input type="checkbox" name="calendar" value="{{ cal_name }}"
+                                   {% if cal_name in device_calendars %}checked{% endif %}>
+                            {{ cal_name }}
+                        </label>
+                        {% endfor %}
+                    </div>
+                </div>
+                {% endif %}
                 <button type="submit" class="btn btn-primary">Save Proximity</button>
                 <span id="proximity-save-status" class="save-status"></span>
             </form>

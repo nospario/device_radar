@@ -29,12 +29,13 @@ Supporting modules:
 | `bt_pair.py` | Bluetooth pairing/unpairing via `bluetoothctl` subprocess |
 | `bt_wifi.py` | WiFi/LAN device discovery via ping sweep + ARP table parsing; targeted ping confirmation |
 | `bt_alexa.py` | Alexa TTS via `alexa_remote_control.sh`, Ollama-generated welcome greetings, encouragement loop, and proximity-triggered messages |
+| `bt_calendar.py` | Apple Calendar (iCloud CalDAV) integration — event fetching, caching, and prompt context for proximity/welcome messages |
 
 ## Database
 
 SQLite with WAL mode (`bt_radar.db`). Core tables:
 
-- **devices** — all known devices with state (`DETECTED`/`LOST`), scan info, flags (`is_watchlisted`, `is_notify`, `is_hidden`, `is_paired`), device linking (`linked_to`), and proximity alert settings (`proximity_enabled`, `proximity_rssi_threshold`, `proximity_interval`, `proximity_alexa_device`, `proximity_prompt`, `last_proximity_message`)
+- **devices** — all known devices with state (`DETECTED`/`LOST`), scan info, flags (`is_watchlisted`, `is_notify`, `is_hidden`, `is_paired`), device linking (`linked_to`), proximity alert settings (`proximity_enabled`, `proximity_rssi_threshold`, `proximity_interval`, `proximity_alexa_device`, `proximity_prompt`, `last_proximity_message`), and calendar integration (`calendar_calendars` — JSON array of calendar names)
 - **events** — arrival/departure event log with timestamps
 - **chat_history** — Telegram bot conversation history for Ollama context
 - **migrations** — tracks one-time data migrations
@@ -158,6 +159,19 @@ Per-device BLE proximity-triggered Alexa messages. Configured on the device deta
 
 Each scan cycle, `bt_alexa.check_proximity_devices()` queries devices with `proximity_enabled=1` and `state=DETECTED`, checks RSSI meets threshold and interval has elapsed, generates a message via Ollama (reuses `generate_encouragement()`), and speaks via the configured Echo. `last_proximity_message` timestamp is stored in the DB to survive restarts.
 
+## Calendar Integration
+
+Per-device Apple Calendar (iCloud CalDAV) context injected into Ollama proximity prompts and welcome-home greetings. Module: `bt_calendar.py`.
+
+Config keys in `config.json`:
+- `calendar_enabled` — toggle on/off (default: false)
+- `calendar_url` — CalDAV server URL (default: `https://caldav.icloud.com`)
+- `calendar_username_env` / `calendar_password_env` — env var names for iCloud credentials (default: `APPLE_ID_EMAIL`, `APPLE_ID_APP_PASSWORD`)
+- `calendar_names` — list of calendar names to show as options on device detail pages
+- `calendar_cache_minutes` — how long to cache events in memory (default: 15)
+
+Per-device calendar selection is stored in the `calendar_calendars` column (JSON array of calendar names), configured via checkboxes on the device detail page within the Proximity Alexa section. Events for today and tomorrow are fetched and cached in memory, keyed by calendar name set. CalDAV fetches are synchronous (caldav library) wrapped in `run_in_executor`. Credentials stored in `/home/pi/.device-radar.env` as `APPLE_ID_EMAIL` and `APPLE_ID_APP_PASSWORD` (app-specific password from Apple).
+
 ## WiFi Departure Confirmation
 
 Before marking a WiFi device as LOST, the scanner sends targeted unicast pings to the device's known IP address via `bt_wifi.ping_host()`. Sleeping phones (especially iPhones) often miss broadcast ping sweeps but respond to direct pings. If the device responds, `last_seen` is updated and departure is cancelled. This prevents false departure/arrival flapping for WiFi-tracked devices.
@@ -226,6 +240,7 @@ bt-monitor/
 ├── bt_alexa.py            # Alexa TTS, welcome greetings, encouragement, proximity alerts
 ├── bt_classify.py         # Device classification logic
 ├── bt_pair.py             # Bluetooth pairing helper
+├── bt_calendar.py         # Apple Calendar (iCloud CalDAV) integration
 ├── bt_wifi.py             # WiFi/LAN scanning module + targeted ping confirmation
 ├── config.json            # User configuration (gitignored)
 ├── bt_radar.db            # SQLite database (auto-created, gitignored)
