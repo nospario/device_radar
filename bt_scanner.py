@@ -42,6 +42,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "wifi_departure_threshold_seconds": 90,
     "wifi_interface": "wlan0",
     "wifi_subnet": None,
+    "arrival_cooldown_seconds": 300,
 }
 
 CONFIG_PATH = Path(__file__).resolve().parent / "config.json"
@@ -123,6 +124,11 @@ class BluetoothRadarScanner:
         self.wifi_departure_threshold: int = config.get("wifi_departure_threshold_seconds", 600)
         self.wifi_interface: str = config.get("wifi_interface", "wlan0")
         self.wifi_subnet: str | None = config.get("wifi_subnet")
+
+        # Arrival cooldown: suppress arrival notifications if the device
+        # departed less than this many seconds ago (prevents flapping spam
+        # from WiFi devices that sleep and wake frequently).
+        self.arrival_cooldown: int = config.get("arrival_cooldown_seconds", 300)
 
     # ------------------------------------------------------------------
     # BLE scanning
@@ -381,6 +387,13 @@ class BluetoothRadarScanner:
         await self._check_arrivals(conn, seen_macs, prev_states)
         await self._check_departures(conn, seen_macs, now)
 
+        # -- Proximity-triggered Alexa messages --
+        if self.config.get("alexa_enabled"):
+            try:
+                await bt_alexa.check_proximity_devices(self.config, self.db_path)
+            except Exception:
+                logger.error("Proximity check failed", exc_info=True)
+
         # -- Periodic paired status sync (every 20th cycle) --
         if self.scan_cycle % 20 == 0:
             try:
@@ -431,6 +444,24 @@ class BluetoothRadarScanner:
                 rssi=dev["last_rssi"],
             )
             logger.info("%s arrived (RSSI %s)", dev_name, dev["last_rssi"])
+
+            # Arrival cooldown: if the device departed very recently, this is
+            # likely a WiFi sleep/wake bounce — not a real return.  Still record
+            # the event above (for audit), but suppress notifications and Alexa.
+            if self.arrival_cooldown > 0:
+                last_events = bt_db.get_events(
+                    conn, mac=mac, event_type="departed", limit=1,
+                )
+                if last_events:
+                    departed_at = last_events[0]["timestamp"]
+                    if (time.time() - departed_at) < self.arrival_cooldown:
+                        logger.info(
+                            "%s arrival suppressed — departed only %ds ago (cooldown %ds)",
+                            dev_name,
+                            int(time.time() - departed_at),
+                            self.arrival_cooldown,
+                        )
+                        continue
 
             # Group-aware notification: check if part of a link group
             group = bt_db.get_link_group(conn, mac)
@@ -484,9 +515,11 @@ class BluetoothRadarScanner:
     ) -> None:
         """Check for devices that have departed.
 
-        For linked devices, only sends one departure notification per group —
-        using the primary's name — and only when ALL group members are past
-        their departure thresholds.
+        Uses scan-type-appropriate thresholds (WiFi gets a longer window).
+        For linked devices, a member is only marked LOST when ALL group
+        members have exceeded their thresholds — so a WiFi detection keeps
+        linked BLE devices alive.  Departure notifications fire once per
+        group when the last member goes LOST.
         """
         notified_groups: set[str] = set()  # primary MACs already notified
 
@@ -497,61 +530,96 @@ class BluetoothRadarScanner:
             if mac in seen_macs:
                 continue
 
-            threshold = self.departure_threshold
+            # Use the appropriate threshold for this device's scan type
+            scan_type = (dev.get("scan_type") or "").lower()
+            if "wifi" in scan_type:
+                threshold = self.wifi_departure_threshold
+            else:
+                threshold = self.departure_threshold
 
-            # Check if departure threshold exceeded
+            # Check if departure threshold exceeded for this device
             last_seen = dev["last_seen"] or 0
-            if last_seen > 0 and (now - last_seen) > threshold:
-                bt_db.update_device(conn, mac, state="LOST")
+            if not (last_seen > 0 and (now - last_seen) > threshold):
+                continue
 
-                # Only record events and notify for watchlisted devices
-                if not dev["is_watchlisted"]:
+            # WiFi devices: do a targeted confirmation ping before declaring
+            # departure.  Sleeping phones often miss broadcast ping sweeps but
+            # respond to direct unicast pings.
+            if "wifi" in scan_type and dev.get("ip_address"):
+                if await bt_wifi.ping_host(dev["ip_address"]):
+                    # Device is still reachable — update last_seen, skip departure
+                    bt_db.update_device(conn, mac, last_seen=now)
+                    logger.debug(
+                        "%s confirmed alive via direct ping to %s",
+                        dev["friendly_name"] or mac, dev["ip_address"],
+                    )
                     continue
 
-                dev_name = dev["friendly_name"] or dev["advertised_name"] or mac
-                bt_db.record_event(
-                    conn, mac, "departed",
-                    device_name=dev_name,
-                    device_type=dev["device_type"],
-                    rssi=dev["last_rssi"],
-                )
-                logger.info("%s departed", dev_name)
-
-                # Group-aware notification: only notify when ALL members departed
-                group = bt_db.get_link_group(conn, mac)
-                primary = group["primary"]
-                if primary and group["secondaries"]:
-                    primary_mac = primary["mac_address"]
-                    if primary_mac in notified_groups:
+            # If device is part of a link group, don't mark it LOST while
+            # any other group member is still within its own threshold.
+            group = bt_db.get_link_group(conn, mac)
+            primary = group["primary"]
+            if primary and group["secondaries"]:
+                all_members = [primary] + group["secondaries"]
+                group_still_home = False
+                for member in all_members:
+                    m_mac = member["mac_address"]
+                    if m_mac == mac:
                         continue
-
-                    # Re-read all members to get current state after updates.
-                    # Only send departure when ALL members are LOST.
-                    all_macs = [primary["mac_address"]] + [s["mac_address"] for s in group["secondaries"]]
-                    any_still_home = False
-                    for m_mac in all_macs:
-                        m_dev = bt_db.get_device(conn, m_mac)
-                        if m_dev and m_dev["state"] == "DETECTED":
-                            any_still_home = True
+                    if m_mac in seen_macs:
+                        group_still_home = True
+                        break
+                    m_dev = bt_db.get_device(conn, m_mac)
+                    if m_dev and m_dev["state"] == "DETECTED":
+                        # Check if this member is also past its threshold
+                        m_scan = (m_dev.get("scan_type") or "").lower()
+                        m_threshold = self.wifi_departure_threshold if "wifi" in m_scan else self.departure_threshold
+                        m_last = m_dev["last_seen"] or 0
+                        if m_last > 0 and (now - m_last) <= m_threshold:
+                            group_still_home = True
                             break
-                    if any_still_home:
-                        continue  # at least one member still home
+                if group_still_home:
+                    continue  # another group member is still home — keep this one alive
 
-                    # Check if any group member has notifications enabled
-                    group_notify = primary.get("is_notify")
-                    if not group_notify:
-                        for s in group["secondaries"]:
-                            if s.get("is_notify"):
-                                group_notify = True
-                                break
-                    if not group_notify:
-                        continue
+            bt_db.update_device(conn, mac, state="LOST")
 
-                    notified_groups.add(primary_mac)
-                    notify_name = primary["friendly_name"] or primary["advertised_name"] or primary_mac
-                    await bt_telegram.send_notification(notify_name, "departed")
-                elif dev["is_notify"]:
-                    await bt_telegram.send_notification(dev_name, "departed")
+            # Only record events and notify for watchlisted devices
+            if not dev["is_watchlisted"]:
+                continue
+
+            dev_name = dev["friendly_name"] or dev["advertised_name"] or mac
+            bt_db.record_event(
+                conn, mac, "departed",
+                device_name=dev_name,
+                device_type=dev["device_type"],
+                rssi=dev["last_rssi"],
+            )
+            logger.info("%s departed", dev_name)
+
+            # Group-aware notification: only notify when ALL members departed
+            if primary and group["secondaries"]:
+                primary_mac = primary["mac_address"]
+                if primary_mac in notified_groups:
+                    continue
+
+                # Re-read all members — only send when ALL are LOST
+                all_macs = [primary["mac_address"]] + [s["mac_address"] for s in group["secondaries"]]
+                any_still_home = any(
+                    bt_db.get_device(conn, m) and bt_db.get_device(conn, m)["state"] == "DETECTED"
+                    for m in all_macs
+                )
+                if any_still_home:
+                    continue
+
+                group_notify = any(m.get("is_notify") for m in [primary] + group["secondaries"])
+                if not group_notify:
+                    continue
+
+                notified_groups.add(primary_mac)
+                notify_name = primary["friendly_name"] or primary["advertised_name"] or primary_mac
+                await bt_telegram.send_notification(notify_name, "departed")
+            elif dev["is_notify"]:
+                await bt_telegram.send_notification(dev_name, "departed")
 
     # ------------------------------------------------------------------
     # Main loop

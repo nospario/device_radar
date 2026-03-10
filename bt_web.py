@@ -86,11 +86,13 @@ def device_detail(mac: str):
         {r["device_type"] for r in rows if r["device_type"] not in standard_types}
     )
 
+    echo_devices = bt_db.get_all_echo_devices(conn)
+
     conn.close()
     return render_template(
         "device.html", device=device, events=events,
         link_group=link_group, linkable=linkable,
-        custom_types=custom_types, active="",
+        custom_types=custom_types, echo_devices=echo_devices, active="",
     )
 
 
@@ -175,6 +177,16 @@ def api_update_device(mac: str):
         kwargs["is_notify"] = bool(data["is_notify"])
     if "is_welcome" in data:
         kwargs["is_welcome"] = bool(data["is_welcome"])
+    if "proximity_enabled" in data:
+        kwargs["proximity_enabled"] = bool(data["proximity_enabled"])
+    if "proximity_rssi_threshold" in data:
+        kwargs["proximity_rssi_threshold"] = int(data["proximity_rssi_threshold"])
+    if "proximity_interval" in data:
+        kwargs["proximity_interval"] = int(data["proximity_interval"])
+    if "proximity_alexa_device" in data:
+        kwargs["proximity_alexa_device"] = data["proximity_alexa_device"] or None
+    if "proximity_prompt" in data:
+        kwargs["proximity_prompt"] = data["proximity_prompt"]
 
     updated = bt_db.update_device(conn, mac, **kwargs)
     conn.close()
@@ -330,7 +342,6 @@ def api_create_echo_device():
         encourage_enabled=data.get("encourage_enabled", False),
         encourage_interval=data.get("encourage_interval", 30),
         encourage_prompt=data.get("encourage_prompt", ""),
-        encourage_when_playing=data.get("encourage_when_playing", True),
     )
     conn.close()
     return jsonify({"ok": True})
@@ -352,8 +363,6 @@ def api_update_echo_device(name: str):
         kwargs["encourage_interval"] = int(data["encourage_interval"])
     if "encourage_prompt" in data:
         kwargs["encourage_prompt"] = data["encourage_prompt"]
-    if "encourage_when_playing" in data:
-        kwargs["encourage_when_playing"] = bool(data["encourage_when_playing"])
 
     bt_db.upsert_echo_device(conn, name, **kwargs)
     conn.close()

@@ -89,6 +89,14 @@ def init_db(db_path: str | Path = DEFAULT_DB_PATH) -> None:
     _add_column(conn, "devices", "linked_to", "TEXT")
     _add_column(conn, "devices", "is_welcome", "INTEGER DEFAULT 0")
 
+    # Proximity-triggered Alexa messages
+    _add_column(conn, "devices", "proximity_enabled", "INTEGER DEFAULT 0")
+    _add_column(conn, "devices", "proximity_rssi_threshold", "INTEGER DEFAULT -70")
+    _add_column(conn, "devices", "proximity_interval", "INTEGER DEFAULT 30")
+    _add_column(conn, "devices", "proximity_alexa_device", "TEXT")
+    _add_column(conn, "devices", "proximity_prompt", "TEXT DEFAULT ''")
+    _add_column(conn, "devices", "last_proximity_message", "REAL DEFAULT 0")
+
     conn.execute("CREATE INDEX IF NOT EXISTS idx_devices_linked_to ON devices(linked_to)")
 
     # Chat history for Telegram bot conversations
@@ -235,6 +243,12 @@ def update_device(
     is_welcome: bool | None = None,
     state: str | None = None,
     last_seen: float | None = None,
+    proximity_enabled: bool | None = None,
+    proximity_rssi_threshold: int | None = None,
+    proximity_interval: int | None = None,
+    proximity_alexa_device: str | None = None,
+    proximity_prompt: str | None = None,
+    last_proximity_message: float | None = None,
 ) -> bool:
     """Update specific fields on a device. Returns True if a row was updated."""
     sets: list[str] = []
@@ -267,6 +281,24 @@ def update_device(
     if last_seen is not None:
         sets.append("last_seen = ?")
         params.append(last_seen)
+    if proximity_enabled is not None:
+        sets.append("proximity_enabled = ?")
+        params.append(int(proximity_enabled))
+    if proximity_rssi_threshold is not None:
+        sets.append("proximity_rssi_threshold = ?")
+        params.append(proximity_rssi_threshold)
+    if proximity_interval is not None:
+        sets.append("proximity_interval = ?")
+        params.append(proximity_interval)
+    if proximity_alexa_device is not None:
+        sets.append("proximity_alexa_device = ?")
+        params.append(proximity_alexa_device or None)
+    if proximity_prompt is not None:
+        sets.append("proximity_prompt = ?")
+        params.append(proximity_prompt)
+    if last_proximity_message is not None:
+        sets.append("last_proximity_message = ?")
+        params.append(last_proximity_message)
 
     if not sets:
         return False

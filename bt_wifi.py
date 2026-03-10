@@ -355,6 +355,27 @@ def detect_subnet(interface: str = "wlan0") -> Optional[str]:
     return None
 
 
+async def ping_host(ip: str, count: int = 3, timeout: int = 1) -> bool:
+    """Send targeted pings to a specific IP address.
+
+    More reliable than a broadcast sweep for waking sleeping devices (e.g.
+    iPhones in WiFi power-save mode).  Returns True if any ping gets a reply.
+    """
+    for _ in range(count):
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "ping", "-c", "1", "-W", str(timeout), ip,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            retcode = await asyncio.wait_for(proc.wait(), timeout=timeout + 2)
+            if retcode == 0:
+                return True
+        except (asyncio.TimeoutError, Exception):
+            pass
+    return False
+
+
 async def ping_sweep(network: str, concurrency: int = 50) -> None:
     """Ping all hosts in the subnet to populate the ARP cache.
 

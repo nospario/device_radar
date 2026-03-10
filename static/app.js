@@ -457,6 +457,36 @@ function initDevicePage(mac) {
             console.error('Failed to save:', e);
         }
     });
+
+    // Proximity form
+    const proxForm = document.getElementById('proximity-form');
+    if (proxForm) {
+        proxForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const pStatus = document.getElementById('proximity-save-status');
+
+            try {
+                await api(`/api/devices/${encodeURIComponent(mac)}`, {
+                    method: 'PATCH',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        proximity_enabled: document.getElementById('proximity-enabled').checked,
+                        proximity_rssi_threshold: parseInt(document.getElementById('proximity-level').value),
+                        proximity_interval: parseInt(document.getElementById('proximity-interval').value) || 30,
+                        proximity_alexa_device: document.getElementById('proximity-alexa-device').value,
+                        proximity_prompt: document.getElementById('proximity-prompt').value,
+                    }),
+                });
+
+                pStatus.textContent = 'Saved!';
+                setTimeout(() => { pStatus.textContent = ''; }, 2000);
+            } catch (err) {
+                pStatus.textContent = 'Error saving';
+                pStatus.style.color = 'var(--red)';
+                console.error('Failed to save proximity:', err);
+            }
+        });
+    }
 }
 
 // -- History --

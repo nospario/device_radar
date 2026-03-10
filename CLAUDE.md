@@ -27,13 +27,14 @@ Supporting modules:
 | `bt_db.py` | SQLite schema (WAL mode), migrations, and all query/mutation functions |
 | `bt_classify.py` | Device type and manufacturer identification from BLE data, device class codes, and name patterns |
 | `bt_pair.py` | Bluetooth pairing/unpairing via `bluetoothctl` subprocess |
-| `bt_wifi.py` | WiFi/LAN device discovery via ping sweep + ARP table parsing |
+| `bt_wifi.py` | WiFi/LAN device discovery via ping sweep + ARP table parsing; targeted ping confirmation |
+| `bt_alexa.py` | Alexa TTS via `alexa_remote_control.sh`, Ollama-generated welcome greetings, encouragement loop, and proximity-triggered messages |
 
 ## Database
 
 SQLite with WAL mode (`bt_radar.db`). Core tables:
 
-- **devices** — all known devices with state (`DETECTED`/`LOST`), scan info, flags (`is_watchlisted`, `is_notify`, `is_hidden`, `is_paired`), and device linking (`linked_to`)
+- **devices** — all known devices with state (`DETECTED`/`LOST`), scan info, flags (`is_watchlisted`, `is_notify`, `is_hidden`, `is_paired`), device linking (`linked_to`), and proximity alert settings (`proximity_enabled`, `proximity_rssi_threshold`, `proximity_interval`, `proximity_alexa_device`, `proximity_prompt`, `last_proximity_message`)
 - **events** — arrival/departure event log with timestamps
 - **chat_history** — Telegram bot conversation history for Ollama context
 - **migrations** — tracks one-time data migrations
@@ -50,6 +51,9 @@ Schema is created/migrated in `bt_db.init_db()`. New columns are added via `_add
 6. Track state transitions: `LOST→DETECTED` (arrival) and `DETECTED→LOST` (departure after threshold)
 7. On transitions for watchlisted devices, send notifications via Telegram
 8. Ignore BLE signals weaker than `rssi_threshold` (default -85 dBm)
+9. WiFi departure confirmation: before marking a WiFi device as LOST, send targeted unicast pings to its known IP — sleeping phones often respond to direct pings even when missed by broadcast sweeps
+10. Arrival cooldown: suppress arrival notifications if the device departed less than `arrival_cooldown_seconds` ago (prevents flapping spam from WiFi sleep/wake cycles)
+11. Proximity alerts: for BLE devices with proximity enabled, generate Ollama messages and speak via Alexa when RSSI meets the configured threshold
 
 ## Device Linking
 
@@ -116,6 +120,9 @@ Presence queries use the REST API (`localhost:8080`) where possible and fall bac
 }
 ```
 
+Additional scanner config keys:
+- `arrival_cooldown_seconds` (default 300) — suppress arrival notifications if device departed less than this many seconds ago
+
 On first run, if `config.json` doesn't exist, a default is created and the script exits with instructions.
 
 ## Web Dashboard & REST API
@@ -124,7 +131,7 @@ Flask app on port 8080 with dark theme.
 
 ### Pages
 - **Dashboard** (`/`) — live device list with stats, filters, watchlist/notify toggles
-- **Device Detail** (`/device/<mac>`) — info, settings, linking, event history
+- **Device Detail** (`/device/<mac>`) — info, settings, linking, event history, proximity Alexa config (BLE devices only)
 - **History** (`/history`) — filterable paginated event log
 - **Pairing** (`/pairing`) — pair/unpair via web UI
 
@@ -138,6 +145,22 @@ Flask app on port 8080 with dark theme.
 - `POST /api/devices/<mac>/link` — link devices
 - `POST /api/devices/<mac>/pair` — initiate pairing
 - `POST /api/device/<id>/notifications` — toggle notifications
+
+## Proximity Alerts
+
+Per-device BLE proximity-triggered Alexa messages. Configured on the device detail page:
+
+- **Proximity enabled** — toggle on/off
+- **Proximity level** — RSSI threshold: Very close (>= -50 dBm, ~1m), Near (>= -70, ~3m), Medium (>= -85, ~10m)
+- **Interval** — minutes between messages (stored as `proximity_interval`)
+- **Alexa device** — which Echo to speak through (falls back to default)
+- **Prompt** — Ollama prompt for message generation
+
+Each scan cycle, `bt_alexa.check_proximity_devices()` queries devices with `proximity_enabled=1` and `state=DETECTED`, checks RSSI meets threshold and interval has elapsed, generates a message via Ollama (reuses `generate_encouragement()`), and speaks via the configured Echo. `last_proximity_message` timestamp is stored in the DB to survive restarts.
+
+## WiFi Departure Confirmation
+
+Before marking a WiFi device as LOST, the scanner sends targeted unicast pings to the device's known IP address via `bt_wifi.ping_host()`. Sleeping phones (especially iPhones) often miss broadcast ping sweeps but respond to direct pings. If the device responds, `last_seen` is updated and departure is cancelled. This prevents false departure/arrival flapping for WiFi-tracked devices.
 
 ## Discovery Mode
 
@@ -200,9 +223,10 @@ bt-monitor/
 ├── bt_web.py              # Flask web dashboard service
 ├── bt_telegram.py         # Telegram bot service
 ├── bt_db.py               # SQLite database module
+├── bt_alexa.py            # Alexa TTS, welcome greetings, encouragement, proximity alerts
 ├── bt_classify.py         # Device classification logic
 ├── bt_pair.py             # Bluetooth pairing helper
-├── bt_wifi.py             # WiFi/LAN scanning module
+├── bt_wifi.py             # WiFi/LAN scanning module + targeted ping confirmation
 ├── config.json            # User configuration (gitignored)
 ├── bt_radar.db            # SQLite database (auto-created, gitignored)
 ├── requirements.txt       # Python dependencies

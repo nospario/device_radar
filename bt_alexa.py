@@ -271,174 +271,6 @@ async def announce_arrival(
 # Player state query
 # ---------------------------------------------------------------------------
 
-async def _get_alexa_env(config: dict[str, Any]) -> dict[str, str] | None:
-    """Load and validate Alexa environment variables."""
-    env_file = config.get("alexa_env_file", "/home/pi/.alexa-env")
-    env = _parse_env_file(env_file)
-    if not env.get("REFRESH_TOKEN"):
-        return None
-    return env
-
-
-async def query_player_state(
-    device_name: str, config: dict[str, Any],
-) -> str | None:
-    """Query the current player state of an Echo device.
-
-    Returns 'PLAYING', 'PAUSED', 'IDLE', or None on failure.
-    Checks both the media state API and Bluetooth A2DP connections,
-    since Spotify Connect reports IDLE via the media API but shows
-    as a connected A2DP-SOURCE device via Bluetooth.
-    """
-    script_path = config.get("alexa_script_path", "/opt/bt-monitor/alexa_remote_control.sh")
-
-    if not Path(script_path).exists():
-        return None
-
-    env = await _get_alexa_env(config)
-    if not env:
-        return None
-
-    os_env = {**dict(__import__("os").environ), **env}
-
-    # First check the standard media state
-    try:
-        proc = await asyncio.wait_for(
-            asyncio.create_subprocess_exec(
-                script_path, "-d", device_name, "-q",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                env=os_env,
-            ),
-            timeout=30,
-        )
-        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
-        output = stdout.decode()
-
-        import json as _json
-        for line in output.split("\n{"):
-            block = "{" + line if not line.startswith("{") else line
-            try:
-                data = _json.loads(block.strip())
-                if "currentState" in data and data["currentState"] == "PLAYING":
-                    return "PLAYING"
-            except _json.JSONDecodeError:
-                continue
-    except Exception as e:
-        logger.debug("Failed to query media state for %s: %s", device_name, e)
-
-    # Fall back to Bluetooth check — Spotify Connect uses A2DP
-    try:
-        proc = await asyncio.wait_for(
-            asyncio.create_subprocess_exec(
-                script_path, "-d", device_name, "-b", "list",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                env=os_env,
-            ),
-            timeout=30,
-        )
-        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
-        # The -b list output doesn't show connection state directly,
-        # so we query the raw Bluetooth API instead.
-    except Exception:
-        pass
-
-    # Query raw Bluetooth API for connected A2DP devices
-    try:
-        serial = await _get_device_serial(device_name, config, os_env)
-        if serial:
-            is_streaming = await _check_bluetooth_streaming(serial, config, os_env)
-            if is_streaming:
-                return "PLAYING"
-    except Exception as e:
-        logger.debug("Failed to check Bluetooth for %s: %s", device_name, e)
-
-    return "IDLE"
-
-
-async def _get_device_serial(
-    device_name: str, config: dict[str, Any], env: dict[str, str],
-) -> str | None:
-    """Get the serial number for an Echo device from the cached device list."""
-    devlist = Path("/tmp/.alexa.devicelist.txt")
-    if not devlist.exists():
-        return None
-    for line in devlist.read_text().splitlines():
-        if line.startswith(device_name + "="):
-            parts = line.split("=")
-            if len(parts) >= 3:
-                return parts[2]  # serial is the 3rd field
-    return None
-
-
-async def _check_bluetooth_streaming(
-    serial: str, config: dict[str, Any], env: dict[str, str],
-) -> bool:
-    """Check if an Echo has any Bluetooth A2DP device connected (audio streaming)."""
-    cookie_path = Path("/tmp/.alexa.cookie")
-    if not cookie_path.exists():
-        return False
-
-    alexa_host = env.get("ALEXA", "alexa.amazon.co.uk")
-    amazon_host = env.get("AMAZON", "amazon.co.uk")
-
-    # Read CSRF token from cookie file
-    csrf = ""
-    for line in cookie_path.read_text().splitlines():
-        if amazon_host in line and "csrf" in line:
-            parts = line.split()
-            if len(parts) >= 7:
-                csrf = parts[6]
-                break
-
-    if not csrf:
-        return False
-
-    try:
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(
-                f"https://{alexa_host}/api/bluetooth?cached=false",
-                headers={
-                    "DNT": "1",
-                    "Connection": "keep-alive",
-                    "Content-Type": "application/json; charset=UTF-8",
-                    "Referer": f"https://alexa.{amazon_host}/spa/index.html",
-                    "Origin": f"https://alexa.{amazon_host}",
-                    "csrf": csrf,
-                },
-                cookies=_load_cookie_jar(cookie_path, amazon_host),
-                timeout=15,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-
-            for state in data.get("bluetoothStates", []):
-                if state.get("deviceSerialNumber") == serial:
-                    for device in state.get("pairedDeviceList", []):
-                        if device.get("connected") and "A2DP-SOURCE" in device.get("profiles", []):
-                            logger.debug(
-                                "Bluetooth audio active: %s connected",
-                                device.get("friendlyName"),
-                            )
-                            return True
-                    return False
-    except Exception as e:
-        logger.debug("Bluetooth API check failed: %s", e)
-
-    return False
-
-
-def _load_cookie_jar(cookie_path: Path, amazon_host: str) -> dict[str, str]:
-    """Parse Netscape cookie file into a dict for httpx."""
-    cookies: dict[str, str] = {}
-    for line in cookie_path.read_text().splitlines():
-        if line.startswith("#") or not line.strip():
-            continue
-        parts = line.split("\t")
-        if len(parts) >= 7:
-            cookies[parts[5]] = parts[6]
-    return cookies
 
 
 # ---------------------------------------------------------------------------
@@ -519,16 +351,6 @@ async def run_encourage_loop(config: dict[str, Any], db_path: Path) -> None:
                 if now - last < interval:
                     continue
 
-                # Check if music is playing (if required)
-                if dev["encourage_when_playing"]:
-                    state = await query_player_state(device_name, config)
-                    if state != "PLAYING":
-                        logger.debug(
-                            "Skipping encourage for %s — state is %s",
-                            device_name, state,
-                        )
-                        continue
-
                 # Generate and speak the message
                 message = await generate_encouragement(prompt, config)
                 if not message:
@@ -548,6 +370,73 @@ async def run_encourage_loop(config: dict[str, Any], db_path: Path) -> None:
 
         except Exception:
             logger.error("Error in encourage loop", exc_info=True)
+
+
+# ---------------------------------------------------------------------------
+# Proximity-triggered messages
+# ---------------------------------------------------------------------------
+
+async def check_proximity_devices(config: dict[str, Any], db_path: Path) -> None:
+    """Check proximity-enabled devices and speak messages when RSSI conditions are met."""
+    conn = bt_db.get_connection(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT * FROM devices WHERE proximity_enabled = 1 AND state = 'DETECTED'"
+        ).fetchall()
+    finally:
+        conn.close()
+
+    if not rows:
+        return
+
+    now = time.time()
+
+    for row in rows:
+        dev = dict(row)
+        mac = dev["mac_address"]
+        scan_type = (dev.get("scan_type") or "").lower()
+
+        # Only BLE devices have meaningful RSSI
+        if "ble" not in scan_type:
+            continue
+
+        rssi = dev.get("last_rssi")
+        if rssi is None:
+            continue
+
+        threshold = dev.get("proximity_rssi_threshold") or -70
+        if rssi < threshold:
+            continue
+
+        interval = (dev.get("proximity_interval") or 30) * 60  # minutes → seconds
+        last = dev.get("last_proximity_message") or 0
+        if now - last < interval:
+            continue
+
+        prompt = dev.get("proximity_prompt") or ""
+        if not prompt:
+            continue
+
+        # Generate message via Ollama (reuse encouragement generator)
+        message = await generate_encouragement(prompt, config)
+        if not message:
+            dev_name = dev["friendly_name"] or dev["advertised_name"] or mac
+            logger.warning("Failed to generate proximity message for %s", dev_name)
+            continue
+
+        # Determine which Echo to speak through
+        echo_device = dev.get("proximity_alexa_device") or config.get("alexa_device_name")
+
+        dev_name = dev["friendly_name"] or dev["advertised_name"] or mac
+        logger.info("Proximity message for %s (RSSI %s): %s", dev_name, rssi, message)
+        success = await speak(message, config, device=echo_device)
+
+        if success:
+            conn = bt_db.get_connection(db_path)
+            bt_db.update_device(conn, mac, last_proximity_message=now)
+            conn.close()
+        else:
+            logger.error("Failed to speak proximity message for %s", dev_name)
 
 
 # ---------------------------------------------------------------------------
