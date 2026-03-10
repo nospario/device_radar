@@ -28,7 +28,7 @@ Supporting modules:
 | `bt_classify.py` | Device type and manufacturer identification from BLE data, device class codes, and name patterns |
 | `bt_pair.py` | Bluetooth pairing/unpairing via `bluetoothctl` subprocess |
 | `bt_wifi.py` | WiFi/LAN device discovery via ping sweep + ARP table parsing; targeted ping confirmation |
-| `bt_alexa.py` | Alexa TTS via `alexa_remote_control.sh`, Ollama-generated welcome greetings, encouragement loop, and proximity-triggered messages |
+| `bt_alexa.py` | Alexa TTS via `alexa_remote_control.sh`, Ollama-generated welcome greetings, encouragement loop, proximity-triggered messages, and per-device SSML voice selection |
 | `bt_calendar.py` | Apple Calendar (iCloud CalDAV) integration — event fetching, caching, and prompt context for proximity/welcome messages |
 | `bt_weather.py` | Current weather via Open-Meteo API — fetches temperature and conditions, caches in memory, provides formatted string for Alexa TTS prefix |
 | `bt_news.py` | BBC News RSS headline fetching, per-device read tracking, and spoken suffix formatting for Alexa TTS |
@@ -37,11 +37,11 @@ Supporting modules:
 
 SQLite with WAL mode (`bt_radar.db`). Core tables:
 
-- **devices** — all known devices with state (`DETECTED`/`LOST`), scan info, flags (`is_watchlisted`, `is_notify`, `is_hidden`, `is_paired`), device linking (`linked_to`), proximity alert settings (`proximity_enabled`, `proximity_rssi_threshold`, `proximity_interval`, `proximity_alexa_device`, `proximity_prompt`, `last_proximity_message`), calendar integration (`calendar_calendars` — JSON array of calendar names), and news feed selection (`news_feeds` — JSON array of feed keys)
+- **devices** — all known devices with state (`DETECTED`/`LOST`), scan info, flags (`is_watchlisted`, `is_notify`, `is_hidden`, `is_paired`), device linking (`linked_to`), proximity alert settings (`proximity_enabled`, `proximity_rssi_threshold`, `proximity_interval`, `proximity_alexa_device`, `proximity_prompt`, `last_proximity_message`), calendar integration (`calendar_calendars` — JSON array of calendar names), news feed selection (`news_feeds` — JSON array of feed keys), and Alexa voice selection (`alexa_voice` — Amazon Polly voice name for SSML)
 - **events** — arrival/departure event log with timestamps
 - **news_headlines** — fetched BBC RSS headlines with guid deduplication, feed_key, title, published timestamp
 - **news_read** — per-device read tracking (mac_address + headline_id), ensures headlines aren't repeated
-- **chat_history** — Telegram bot conversation history for Ollama context
+- **chat_history** — conversation history for Ollama context (Telegram bot uses numeric chat_id, web assistant uses `"web_assistant"`)
 - **migrations** — tracks one-time data migrations
 
 Schema is created/migrated in `bt_db.init_db()`. New columns are added via `_add_column()`. One-time data migrations use `_run_migration()`.
@@ -86,6 +86,7 @@ Devices can appear with different MACs across scan types (BLE vs WiFi). The `lin
 - **Person resolution** — maps names to devices via `person_aliases` config, then fuzzy-matches `friendly_name`, then resolves link groups
 - **General chat** — forwarded to local Ollama instance (configurable model, default `qwen2.5:1.5b`)
 - **Conversation history** — stored in `chat_history` SQLite table, last N messages sent as context
+- **Read-aloud mode** — `/readaloud on [device]` toggles automatic Alexa TTS for chat responses; `/readaloud voice <name>` sets Polly voice; state is in-memory (resets on restart, default off)
 - **Authorization** — only responds to the configured `TELEGRAM_CHAT_ID`
 - **Graceful degradation** — presence queries work without Ollama; chat returns friendly error on timeout
 
@@ -147,9 +148,10 @@ Flask app on port 8080 with dark theme.
 
 ### Pages
 - **Dashboard** (`/`) — live device list with stats, filters, watchlist/notify toggles
-- **Device Detail** (`/device/<mac>`) — info, settings, linking, event history, proximity Alexa config (BLE devices only), calendar selection, BBC News feed selection (all devices)
+- **Device Detail** (`/device/<mac>`) — info, settings (including Alexa voice selection), linking, event history, proximity Alexa config (BLE devices only), calendar selection, BBC News feed selection (all devices)
 - **History** (`/history`) — filterable paginated event log
 - **Pairing** (`/pairing`) — pair/unpair via web UI
+- **Assistant** (`/assistant`) — Ollama chat interface with "Read on Alexa" toggle, Echo device/voice selection, persistent conversation history
 
 ### Key API Endpoints
 - `GET /api/devices` — all devices (filters: state, watchlisted, hidden, scan_type, unmerged)
@@ -161,6 +163,10 @@ Flask app on port 8080 with dark theme.
 - `POST /api/devices/<mac>/link` — link devices
 - `POST /api/devices/<mac>/pair` — initiate pairing
 - `POST /api/device/<id>/notifications` — toggle notifications
+- `GET /api/assistant/history` — web assistant conversation history
+- `POST /api/assistant/chat` — send message to Ollama, returns response
+- `DELETE /api/assistant/history` — clear web assistant conversation
+- `POST /api/assistant/speak` — speak text on Alexa device
 
 ## Proximity Alerts
 
@@ -205,7 +211,15 @@ Config keys in `config.json`:
 - `news_headline_count` — how many headlines per alert (default: 3)
 - `news_cache_minutes` — how often to re-fetch each RSS feed (default: 15)
 
-19 BBC RSS feeds are hardcoded in `bt_news.BBC_FEEDS` (Top Stories, UK, World, Business, Politics, Technology, Science, Health, Education, Entertainment, England, Sport, Football, Cricket, F1, Rugby Union, Tennis, Golf, Nottm Forest). Per-device feed selection is stored in the `news_feeds` column (JSON array of feed keys), configured via grouped checkboxes on the device detail page. Headlines are stored in `news_headlines` table with guid deduplication. Per-device read tracking via `news_read` table ensures headlines aren't repeated — one device hearing a headline does not mark it as read for other devices. Headlines older than 7 days are automatically pruned. Feeds are refreshed before each alert to catch breaking news.
+20 BBC RSS feeds are hardcoded in `bt_news.BBC_FEEDS` (Top Stories, UK, World, Business, Politics, Technology, Science, Health, Education, Entertainment, England, Sport, Football, Cricket, F1, Rugby Union, Tennis, Golf, Nottm Forest, Leicester City). Per-device feed selection is stored in the `news_feeds` column (JSON array of feed keys), configured via grouped checkboxes on the device detail page. Headlines are stored in `news_headlines` table with guid deduplication (URL fragments stripped, guids prefixed with feed key). Cross-feed title deduplication via `GROUP BY title` in queries prevents the same story from being read twice even when it appears in multiple feeds. Per-device read tracking via `news_read` table ensures headlines aren't repeated — one device hearing a headline does not mark it as read for other devices. Marking a headline as read also marks all other rows with the same title, preventing cross-feed resurface. Headlines older than 7 days are automatically pruned. Feeds are refreshed before each alert to catch breaking news.
+
+## Alexa Voice Selection
+
+Per-device configurable TTS voice using Amazon Polly SSML voices. Stored in the `alexa_voice` column (Polly voice name string). Configured via a dropdown in the Settings card on the device detail page.
+
+Available voices: Brian (British male), Amy (British female), Emma (British female), Matthew (US male), Joanna (US female), Kendra (US female). Default is the standard Alexa voice (empty string).
+
+When a voice is set, the `speak()` function in `bt_alexa.py` wraps the message in SSML: `<speak><voice name='Brian'>...</voice></speak>`. Applied to both arrival greetings and proximity alert messages.
 
 ## WiFi Departure Confirmation
 
@@ -288,7 +302,7 @@ bt-monitor/
 ├── bt-scanner.service     # Systemd unit for scanner
 ├── bt-web.service         # Systemd unit for web dashboard
 ├── bt-telegram.service    # Systemd unit for Telegram bot
-├── templates/             # Jinja2 templates (dashboard, device, history, pairing)
+├── templates/             # Jinja2 templates (dashboard, device, history, pairing, assistant)
 ├── static/                # CSS and JS (dark theme)
 └── README.md
 ```

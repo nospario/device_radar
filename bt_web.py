@@ -4,13 +4,17 @@ discovered Bluetooth devices."""
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import time as _time
 from pathlib import Path
 from typing import Any
 
+import httpx
 from flask import Flask, jsonify, render_template, request
 
+import bt_alexa
 import bt_calendar
 import bt_db
 import bt_news
@@ -130,6 +134,15 @@ def alexa():
     config = load_config()
     alexa_enabled = config.get("alexa_enabled", False)
     return render_template("alexa.html", active="alexa", alexa_enabled=alexa_enabled)
+
+
+@app.route("/assistant")
+def assistant():
+    conn = get_conn()
+    echo_devices = bt_db.get_all_echo_devices(conn)
+    conn.close()
+    return render_template("assistant.html", active="assistant",
+                           echo_devices=echo_devices)
 
 
 # ---------------------------------------------------------------------------
@@ -402,6 +415,142 @@ def api_delete_echo_device(name: str):
     if not ok:
         return jsonify({"error": "not found"}), 404
     return jsonify({"ok": True})
+
+
+# ---------------------------------------------------------------------------
+# Assistant (Ollama chat) endpoints
+# ---------------------------------------------------------------------------
+
+def _call_ollama_sync(
+    messages: list[dict[str, str]], config: dict[str, Any],
+) -> str | None:
+    """Call Ollama synchronously (for use in Flask request context)."""
+    base_url = config.get("ollama_url", "http://localhost:11434")
+    timeout = config.get("ollama_timeout_seconds", 15)
+    model = config.get("ollama_model", "qwen2.5:1.5b")
+
+    parts: list[str] = []
+    system_prompt = ""
+    for msg in messages:
+        role = msg["role"]
+        content = msg["content"]
+        if role == "system":
+            system_prompt = content
+        elif role == "user":
+            parts.append(f"User: {content}")
+        elif role == "assistant":
+            parts.append(f"Assistant: {content}")
+    parts.append("Assistant:")
+    prompt = "\n".join(parts)
+
+    payload: dict[str, Any] = {
+        "model": model,
+        "prompt": prompt,
+        "stream": False,
+    }
+    if system_prompt:
+        payload["system"] = system_prompt
+
+    try:
+        resp = httpx.post(
+            f"{base_url}/api/generate", json=payload, timeout=timeout,
+        )
+        resp.raise_for_status()
+        return resp.json().get("response", "").strip()
+    except httpx.TimeoutException:
+        logger.warning("Ollama timed out after %ds", timeout)
+        return None
+    except Exception as exc:
+        logger.error("Ollama error: %s", exc)
+        return None
+
+
+@app.route("/api/assistant/history")
+def api_assistant_history():
+    """Return web assistant conversation history."""
+    conn = get_conn()
+    history = bt_db.get_chat_history(conn, "web_assistant", limit=50)
+    conn.close()
+    return jsonify({"messages": history})
+
+
+@app.route("/api/assistant/history", methods=["DELETE"])
+def api_assistant_clear_history():
+    """Clear web assistant conversation history."""
+    conn = get_conn()
+    bt_db.clear_chat_history(conn, "web_assistant")
+    conn.close()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/assistant/chat", methods=["POST"])
+def api_assistant_chat():
+    """Send a message to Ollama and return the response."""
+    data = request.get_json()
+    if not data or "message" not in data:
+        return jsonify({"error": "message required"}), 400
+
+    user_message = data["message"].strip()
+    if not user_message:
+        return jsonify({"error": "empty message"}), 400
+
+    config = load_config()
+    conn = get_conn()
+
+    # Save user message
+    bt_db.save_chat_message(conn, "web_assistant", "user", user_message)
+
+    # Build conversation context
+    history_limit = config.get("conversation_history_length", 10)
+    history = bt_db.get_chat_history(conn, "web_assistant", limit=history_limit)
+    conn.close()
+
+    system_prompt = config.get(
+        "system_prompt",
+        "You are a helpful assistant running locally on a Raspberry Pi at home. "
+        "Keep responses concise and conversational.",
+    )
+    messages: list[dict[str, str]] = [{"role": "system", "content": system_prompt}]
+    messages.extend({"role": m["role"], "content": m["content"]} for m in history)
+
+    response_text = _call_ollama_sync(messages, config)
+    if response_text is None:
+        response_text = (
+            "Sorry, I'm having trouble thinking right now. Try again in a moment."
+        )
+
+    now = _time.time()
+    conn = get_conn()
+    bt_db.save_chat_message(conn, "web_assistant", "assistant", response_text)
+    conn.close()
+
+    return jsonify({"response": response_text, "timestamp": now})
+
+
+@app.route("/api/assistant/speak", methods=["POST"])
+def api_assistant_speak():
+    """Speak text on an Alexa device."""
+    data = request.get_json()
+    if not data or "text" not in data:
+        return jsonify({"error": "text required"}), 400
+
+    config = load_config()
+    if not config.get("alexa_enabled"):
+        return jsonify({"ok": False, "error": "Alexa not enabled"}), 400
+
+    text = data["text"]
+    device = data.get("device") or None
+    voice = data.get("voice") or None
+
+    try:
+        success = asyncio.run(
+            bt_alexa.speak(text, config, device=device, voice=voice),
+        )
+    except Exception as exc:
+        logger.error("Alexa speak error: %s", exc)
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+    return jsonify({"ok": success})
 
 
 # ---------------------------------------------------------------------------

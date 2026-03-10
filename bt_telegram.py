@@ -763,6 +763,17 @@ async def _cmd_watchlist(update, context) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Read-aloud state (in-memory, resets on restart — default off)
+# ---------------------------------------------------------------------------
+
+_readaloud_enabled: bool = False
+_readaloud_device: str | None = None
+_readaloud_voice: str | None = None
+
+_VALID_VOICES = {"brian", "amy", "emma", "matthew", "joanna", "kendra"}
+
+
+# ---------------------------------------------------------------------------
 # Telegram bot handlers — Alexa commands
 # ---------------------------------------------------------------------------
 
@@ -848,6 +859,88 @@ async def _cmd_echoes(update, context) -> None:
     await update.message.reply_text("\n".join(lines))
 
 
+async def _cmd_readaloud(update, context) -> None:
+    """Handle /readaloud — toggle Alexa read-aloud for chat responses."""
+    if not _is_authorized(update.effective_chat.id):
+        return
+
+    global _readaloud_enabled, _readaloud_device, _readaloud_voice
+
+    args, _ = _parse_args(context.args)
+
+    # No args — show status
+    if not args:
+        if not _readaloud_enabled:
+            await update.message.reply_text(
+                "\U0001f508 Read-aloud is off.\n\n"
+                "Usage:\n"
+                "  /readaloud on [device]\n"
+                "  /readaloud off\n"
+                "  /readaloud voice <name>\n"
+                "  /readaloud voice off",
+            )
+        else:
+            dev = _readaloud_device or "default"
+            voice = _readaloud_voice or "default"
+            await update.message.reply_text(
+                f"\U0001f50a Read-aloud is on\n"
+                f"Device: {dev}\n"
+                f"Voice: {voice}",
+            )
+        return
+
+    action = args[0].lower()
+
+    # /readaloud on [device]
+    if action == "on":
+        _readaloud_enabled = True
+        if len(args) > 1:
+            _readaloud_device = args[1]
+            await update.message.reply_text(
+                f"\U0001f50a Read-aloud enabled on {args[1]}",
+            )
+        else:
+            _readaloud_device = None
+            await update.message.reply_text(
+                "\U0001f50a Read-aloud enabled (default device)",
+            )
+        return
+
+    # /readaloud off
+    if action == "off":
+        _readaloud_enabled = False
+        await update.message.reply_text("\U0001f508 Read-aloud disabled")
+        return
+
+    # /readaloud voice <name|off>
+    if action == "voice":
+        if len(args) < 2:
+            await update.message.reply_text(
+                "Usage: /readaloud voice <name|off>\n"
+                "Available: Brian, Amy, Emma, Matthew, Joanna, Kendra",
+            )
+            return
+        voice_arg = args[1].lower()
+        if voice_arg == "off":
+            _readaloud_voice = None
+            await update.message.reply_text("\U0001f508 Voice reset to default")
+        elif voice_arg in _VALID_VOICES:
+            _readaloud_voice = args[1].capitalize()
+            await update.message.reply_text(
+                f"\U0001f50a Voice set to {_readaloud_voice}",
+            )
+        else:
+            await update.message.reply_text(
+                f"Unknown voice \"{args[1]}\".\n"
+                "Available: Brian, Amy, Emma, Matthew, Joanna, Kendra",
+            )
+        return
+
+    await update.message.reply_text(
+        "Usage: /readaloud on|off  or  /readaloud voice <name>",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Telegram bot handlers — message router
 # ---------------------------------------------------------------------------
@@ -899,6 +992,20 @@ async def _handle_message(update, context) -> None:
     conn.close()
 
     await update.message.reply_text(response)
+
+    # Read aloud on Alexa if enabled
+    if _readaloud_enabled:
+        try:
+            import bt_alexa
+
+            device = _readaloud_device
+            if device:
+                device = bt_alexa.resolve_device_alias(device, config) or device
+            await bt_alexa.speak(
+                response, config, device=device, voice=_readaloud_voice,
+            )
+        except Exception:
+            logger.debug("Read-aloud speak failed", exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -956,6 +1063,7 @@ def main() -> None:
     app.add_handler(CommandHandler("find", _cmd_find))
     app.add_handler(CommandHandler("say", _cmd_say))
     app.add_handler(CommandHandler("echoes", _cmd_echoes))
+    app.add_handler(CommandHandler("readaloud", _cmd_readaloud))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, _handle_message))
 
     # Register bot commands with Telegram so they appear in the / menu
@@ -975,6 +1083,7 @@ def main() -> None:
             BotCommand("find", "Detailed info about a device"),
             BotCommand("say", "Speak a message on an Echo device"),
             BotCommand("echoes", "List available Echo devices"),
+            BotCommand("readaloud", "Toggle Alexa read-aloud for chat"),
         ])
 
     app.post_init = _post_init

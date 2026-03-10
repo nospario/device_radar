@@ -1,0 +1,315 @@
+{% extends "base.html" %}
+{% block title %}Assistant - Device Radar{% endblock %}
+
+{% block content %}
+<div class="section">
+    <div class="section-header">
+        <h2>Assistant</h2>
+        <div class="assistant-controls">
+            <label class="toggle-label" title="Automatically read responses on Alexa">
+                <input type="checkbox" id="alexa-toggle">
+                <span class="toggle-text">Read on Alexa</span>
+            </label>
+            <select id="alexa-device" title="Echo device">
+                <option value="">Default Echo</option>
+                {% for d in echo_devices %}
+                <option value="{{ d.device_name }}">{{ d.alias or d.device_name }}</option>
+                {% endfor %}
+            </select>
+            <select id="alexa-voice" title="Voice">
+                <option value="">Default voice</option>
+                <option value="Brian">Brian (British male)</option>
+                <option value="Amy">Amy (British female)</option>
+                <option value="Emma">Emma (British female)</option>
+                <option value="Matthew">Matthew (US male)</option>
+                <option value="Joanna">Joanna (US female)</option>
+                <option value="Kendra">Kendra (US female)</option>
+            </select>
+            <button class="btn btn-sm" onclick="clearHistory()" title="Clear conversation">Clear</button>
+        </div>
+    </div>
+
+    <div id="status-msg" class="pair-status" style="display:none;"></div>
+
+    <div id="chat-messages" class="chat-messages">
+        <!-- Messages rendered by JS -->
+    </div>
+
+    <form id="chat-form" class="chat-input-area">
+        <input type="text" id="chat-input" placeholder="Ask me anything..." autocomplete="off">
+        <button type="submit" class="btn btn-primary" id="chat-send">Send</button>
+    </form>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<style>
+    .assistant-controls {
+        display: flex;
+        gap: 0.5rem;
+        align-items: center;
+        flex-wrap: wrap;
+    }
+    .assistant-controls select {
+        padding: 0.3rem 0.5rem;
+        font-size: 0.8rem;
+        min-width: 0;
+    }
+    .toggle-label {
+        display: flex;
+        align-items: center;
+        gap: 0.4rem;
+        cursor: pointer;
+        font-size: 0.85rem;
+        color: var(--text-dim);
+        white-space: nowrap;
+    }
+    .toggle-label input:checked + .toggle-text {
+        color: var(--green);
+    }
+    .chat-messages {
+        display: flex;
+        flex-direction: column;
+        gap: 0.75rem;
+        padding: 1rem;
+        background: var(--bg);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        min-height: 300px;
+        max-height: calc(100vh - 300px);
+        overflow-y: auto;
+        margin-bottom: 1rem;
+    }
+    .chat-bubble {
+        max-width: 85%;
+        padding: 0.75rem 1rem;
+        border-radius: var(--radius);
+        border: 1px solid var(--border);
+        word-wrap: break-word;
+        white-space: pre-wrap;
+        line-height: 1.5;
+    }
+    .chat-bubble.user {
+        align-self: flex-end;
+        background: rgba(91, 138, 245, 0.15);
+        border-color: rgba(91, 138, 245, 0.3);
+    }
+    .chat-bubble.assistant {
+        align-self: flex-start;
+        background: var(--bg-card);
+    }
+    .bubble-text {
+        font-size: 0.9rem;
+    }
+    .bubble-meta {
+        font-size: 0.7rem;
+        color: var(--text-dim);
+        margin-top: 0.4rem;
+    }
+    .chat-input-area {
+        display: flex;
+        gap: 0.5rem;
+    }
+    .chat-input-area input {
+        flex: 1;
+    }
+    .chat-input-area button {
+        white-space: nowrap;
+    }
+    .dot-pulse {
+        display: inline-flex;
+        gap: 0.3rem;
+        padding: 0.2rem 0;
+    }
+    .dot-pulse span {
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: var(--text-dim);
+        animation: dotPulse 1.2s ease-in-out infinite;
+    }
+    .dot-pulse span:nth-child(2) { animation-delay: 0.2s; }
+    .dot-pulse span:nth-child(3) { animation-delay: 0.4s; }
+    @keyframes dotPulse {
+        0%, 80%, 100% { opacity: 0.3; transform: scale(0.8); }
+        40% { opacity: 1; transform: scale(1); }
+    }
+    @media (max-width: 768px) {
+        .section-header { flex-direction: column; align-items: flex-start; gap: 0.75rem; }
+        .chat-messages { max-height: calc(100vh - 340px); }
+        .chat-bubble { max-width: 95%; }
+    }
+</style>
+<script>
+(function() {
+    const STORAGE_KEY = 'assistant-alexa-settings';
+
+    // Restore Alexa toggle + selections from localStorage
+    function restoreSettings() {
+        try {
+            const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
+            if (saved.toggle) document.getElementById('alexa-toggle').checked = true;
+            if (saved.device) document.getElementById('alexa-device').value = saved.device;
+            if (saved.voice) document.getElementById('alexa-voice').value = saved.voice;
+        } catch (_) {}
+    }
+
+    function saveSettings() {
+        const settings = {
+            toggle: document.getElementById('alexa-toggle').checked,
+            device: document.getElementById('alexa-device').value,
+            voice: document.getElementById('alexa-voice').value,
+        };
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
+    }
+
+    // Persist on change
+    document.getElementById('alexa-toggle').addEventListener('change', saveSettings);
+    document.getElementById('alexa-device').addEventListener('change', saveSettings);
+    document.getElementById('alexa-voice').addEventListener('change', saveSettings);
+
+    function scrollToBottom() {
+        const container = document.getElementById('chat-messages');
+        container.scrollTop = container.scrollHeight;
+    }
+
+    function appendMessage(role, content, timestamp, scroll) {
+        if (scroll === undefined) scroll = true;
+        const container = document.getElementById('chat-messages');
+
+        const bubble = document.createElement('div');
+        bubble.className = 'chat-bubble ' + role;
+
+        const text = document.createElement('div');
+        text.className = 'bubble-text';
+        text.textContent = content;
+        bubble.appendChild(text);
+
+        if (timestamp) {
+            const meta = document.createElement('div');
+            meta.className = 'bubble-meta';
+            meta.textContent = new Date(timestamp * 1000).toLocaleTimeString();
+            bubble.appendChild(meta);
+        }
+
+        container.appendChild(bubble);
+        if (scroll) scrollToBottom();
+    }
+
+    function showLoading() {
+        const container = document.getElementById('chat-messages');
+        const el = document.createElement('div');
+        el.className = 'chat-bubble assistant';
+        el.id = 'loading-indicator';
+        el.innerHTML = '<div class="dot-pulse"><span></span><span></span><span></span></div>';
+        container.appendChild(el);
+        scrollToBottom();
+    }
+
+    function hideLoading() {
+        const el = document.getElementById('loading-indicator');
+        if (el) el.remove();
+    }
+
+    function showStatus(msg, success) {
+        const el = document.getElementById('status-msg');
+        el.textContent = msg;
+        el.className = 'pair-status ' + (success ? 'pair-success' : 'pair-error');
+        el.style.display = 'block';
+        setTimeout(function() { el.style.display = 'none'; }, 3000);
+    }
+
+    async function speakOnAlexa(text) {
+        const device = document.getElementById('alexa-device').value;
+        const voice = document.getElementById('alexa-voice').value;
+        try {
+            const resp = await api('/api/assistant/speak', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    text: text,
+                    device: device || null,
+                    voice: voice || null,
+                }),
+            });
+            if (!resp.ok) {
+                showStatus(resp.error || 'Failed to speak on Alexa', false);
+            }
+        } catch (err) {
+            showStatus('Failed to speak on Alexa', false);
+        }
+    }
+
+    async function loadChatHistory() {
+        try {
+            const data = await api('/api/assistant/history');
+            const container = document.getElementById('chat-messages');
+            container.innerHTML = '';
+            if (data.messages) {
+                for (const msg of data.messages) {
+                    appendMessage(msg.role, msg.content, msg.timestamp, false);
+                }
+            }
+            scrollToBottom();
+        } catch (err) {
+            console.error('Failed to load chat history:', err);
+        }
+    }
+
+    // Chat form submit
+    document.getElementById('chat-form').addEventListener('submit', async function(e) {
+        e.preventDefault();
+        const input = document.getElementById('chat-input');
+        const text = input.value.trim();
+        if (!text) return;
+
+        input.value = '';
+        appendMessage('user', text, Date.now() / 1000);
+        showLoading();
+
+        const sendBtn = document.getElementById('chat-send');
+        sendBtn.disabled = true;
+
+        try {
+            const data = await api('/api/assistant/chat', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ message: text }),
+            });
+            hideLoading();
+            appendMessage('assistant', data.response, data.timestamp);
+
+            // Auto-speak if toggle is on
+            if (document.getElementById('alexa-toggle').checked) {
+                speakOnAlexa(data.response);
+            }
+        } catch (err) {
+            hideLoading();
+            appendMessage('assistant',
+                'Sorry, something went wrong. Please try again.',
+                Date.now() / 1000);
+        } finally {
+            sendBtn.disabled = false;
+            input.focus();
+        }
+    });
+
+    // Clear history
+    window.clearHistory = async function() {
+        if (!confirm('Clear all conversation history?')) return;
+        try {
+            await api('/api/assistant/history', { method: 'DELETE' });
+            document.getElementById('chat-messages').innerHTML = '';
+            showStatus('History cleared', true);
+        } catch (err) {
+            showStatus('Failed to clear history', false);
+        }
+    };
+
+    // Init
+    restoreSettings();
+    loadChatHistory();
+    document.getElementById('chat-input').focus();
+})();
+</script>
+{% endblock %}

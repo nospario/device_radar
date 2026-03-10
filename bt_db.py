@@ -692,6 +692,13 @@ def cleanup_chat_history(conn: sqlite3.Connection, max_age_days: int = 7) -> int
     return cur.rowcount
 
 
+def clear_chat_history(conn: sqlite3.Connection, chat_id: str) -> int:
+    """Delete all chat history for a specific chat_id. Returns count deleted."""
+    cur = conn.execute("DELETE FROM chat_history WHERE chat_id = ?", (chat_id,))
+    conn.commit()
+    return cur.rowcount
+
+
 # ---------------------------------------------------------------------------
 # Echo devices (Alexa encourage mode)
 # ---------------------------------------------------------------------------
