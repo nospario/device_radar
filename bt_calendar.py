@@ -204,6 +204,13 @@ def _fetch_events_sync(
                             else datetime.combine(dtend, datetime.min.time())
                         )
 
+                    # Strip timezone info to avoid mixed tz-aware/naive
+                    # sort errors — we only need local time for display.
+                    if hasattr(start_datetime, "tzinfo") and start_datetime.tzinfo:
+                        start_datetime = start_datetime.replace(tzinfo=None)
+                    if hasattr(end_datetime, "tzinfo") and end_datetime.tzinfo:
+                        end_datetime = end_datetime.replace(tzinfo=None)
+
                     events.append(
                         CalendarEvent(
                             summary=summary,
