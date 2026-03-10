@@ -252,6 +252,7 @@ def update_device(
     proximity_alexa_device: str | None = None,
     proximity_prompt: str | None = None,
     last_proximity_message: float | None = None,
+    calendar_calendars: str | None = None,
 ) -> bool:
     """Update specific fields on a device. Returns True if a row was updated."""
     sets: list[str] = []
@@ -302,6 +303,9 @@ def update_device(
     if last_proximity_message is not None:
         sets.append("last_proximity_message = ?")
         params.append(last_proximity_message)
+    if calendar_calendars is not None:
+        sets.append("calendar_calendars = ?")
+        params.append(calendar_calendars)
 
     if not sets:
         return False
