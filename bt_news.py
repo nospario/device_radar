@@ -50,6 +50,7 @@ BBC_FEEDS: dict[str, dict[str, str]] = {
     "tennis":              {"name": "Tennis",                "category": "sport", "url": "https://feeds.bbci.co.uk/sport/tennis/rss.xml"},
     "golf":                {"name": "Golf",                  "category": "sport", "url": "https://feeds.bbci.co.uk/sport/golf/rss.xml"},
     "nottm_forest":        {"name": "Nottm Forest",          "category": "sport", "url": "https://feeds.bbci.co.uk/sport/football/teams/nottingham-forest/rss.xml"},
+    "leicester_city":      {"name": "Leicester City",        "category": "sport", "url": "https://feeds.bbci.co.uk/sport/football/teams/leicester-city/rss.xml"},
 }
 
 # Prefixes to strip from headlines for cleaner TTS
