@@ -122,15 +122,16 @@ async def _generate_greeting(
     model = config.get("alexa_ollama_model") or config.get("ollama_model", "qwen2.5:1.5b")
 
     time_of_day = _get_time_of_day()
-    day_of_week = datetime.now().strftime("%A")
 
     away_context = ""
     if time_away:
         away_context = f" They have been away for {time_away}."
 
+    today_str = datetime.now().strftime("%A %-d %B %Y")
+
     prompt = (
         f"Generate a single sentence welcome home greeting for {person_name}. "
-        f"It is {time_of_day} on {day_of_week}.{away_context} "
+        f"It is {time_of_day} on {today_str}.{away_context} "
         f"{calendar_context}"
         f"Keep it casual, warm, and under 30 words. "
         f"Do not use emoji, hashtags, special characters, or quotation marks. "
@@ -302,11 +303,11 @@ async def generate_encouragement(
     model = config.get("alexa_ollama_model") or config.get("ollama_model", "qwen2.5:1.5b")
 
     time_of_day = _get_time_of_day()
-    day_of_week = datetime.now().strftime("%A")
+    today_str = datetime.now().strftime("%A %-d %B %Y")
 
     full_prompt = (
         f"{prompt} "
-        f"It is {time_of_day} on {day_of_week}. "
+        f"It is {time_of_day} on {today_str}. "
         f"{calendar_context}"
         f"Keep it to a single sentence, casual and friendly, under 30 words. "
         f"Do not use emoji, hashtags, special characters, or quotation marks. "
