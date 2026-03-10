@@ -11,6 +11,7 @@ from typing import Any
 
 from flask import Flask, jsonify, render_template, request
 
+import bt_calendar
 import bt_db
 import bt_pair
 
@@ -91,7 +92,7 @@ def device_detail(mac: str):
     conn.close()
 
     config = load_config()
-    calendar_names = config.get("calendar_names", [])
+    calendar_names = bt_calendar.get_available_calendars(config)
     try:
         device_calendars = json.loads(device.get("calendar_calendars") or "[]")
     except (json.JSONDecodeError, TypeError):

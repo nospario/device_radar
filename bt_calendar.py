@@ -71,6 +71,58 @@ class _CacheEntry:
 # Cache keyed by frozenset of calendar names.
 _cache: dict[frozenset[str], _CacheEntry] = {}
 
+# Cache for available calendar names.
+_calendar_names_cache: list[str] = []
+_calendar_names_fetched_at: float = 0
+
+
+# ---------------------------------------------------------------------------
+# Calendar discovery
+# ---------------------------------------------------------------------------
+
+def get_available_calendars(config: dict[str, Any]) -> list[str]:
+    """Return list of calendar names from the CalDAV account (cached).
+
+    Uses the same cache TTL as event fetching.  Returns an empty list if
+    calendar integration is disabled or credentials are missing.
+    This is synchronous — suitable for Flask routes.
+    """
+    global _calendar_names_cache, _calendar_names_fetched_at
+
+    if not config.get("calendar_enabled", False):
+        return []
+
+    ttl = config.get("calendar_cache_minutes", 15) * 60
+    if _calendar_names_cache and (time.time() - _calendar_names_fetched_at) < ttl:
+        return _calendar_names_cache
+
+    url = config.get("calendar_url", "https://caldav.icloud.com")
+    username_env = config.get("calendar_username_env", "APPLE_ID_EMAIL")
+    password_env = config.get("calendar_password_env", "APPLE_ID_APP_PASSWORD")
+    username = os.environ.get(username_env, "")
+    password = os.environ.get(password_env, "")
+
+    if not username or not password:
+        logger.warning(
+            "Calendar credentials not set (need %s and %s in environment)",
+            username_env, password_env,
+        )
+        return _calendar_names_cache  # return stale if available
+
+    try:
+        import caldav
+        client = caldav.DAVClient(url=url, username=username, password=password)
+        principal = client.principal()
+        calendars = principal.calendars()
+        names = sorted({c.name for c in calendars if c.name})
+        _calendar_names_cache = names
+        _calendar_names_fetched_at = time.time()
+        logger.info("Discovered %d calendars from CalDAV", len(names))
+        return names
+    except Exception:
+        logger.error("Failed to discover calendars from CalDAV", exc_info=True)
+        return _calendar_names_cache  # return stale if available
+
 
 # ---------------------------------------------------------------------------
 # CalDAV fetching (synchronous — run in executor)

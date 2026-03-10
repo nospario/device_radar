@@ -122,7 +122,6 @@ Presence queries use the REST API (`localhost:8080`) where possible and fall bac
   "calendar_url": "https://caldav.icloud.com",
   "calendar_username_env": "APPLE_ID_EMAIL",
   "calendar_password_env": "APPLE_ID_APP_PASSWORD",
-  "calendar_names": ["Our Joint Calendar", "Work", "My Home", "Lilou's Sporting Calendar"],
   "calendar_cache_minutes": 15
 }
 ```
@@ -173,10 +172,9 @@ Config keys in `config.json`:
 - `calendar_enabled` — toggle on/off (default: false)
 - `calendar_url` — CalDAV server URL (default: `https://caldav.icloud.com`)
 - `calendar_username_env` / `calendar_password_env` — env var names for iCloud credentials (default: `APPLE_ID_EMAIL`, `APPLE_ID_APP_PASSWORD`)
-- `calendar_names` — list of calendar names to show as options on device detail pages
-- `calendar_cache_minutes` — how long to cache events in memory (default: 15)
+- `calendar_cache_minutes` — how long to cache calendar names and events in memory (default: 15)
 
-Per-device calendar selection is stored in the `calendar_calendars` column (JSON array of calendar names), configured via checkboxes in a dedicated Calendar card on the device detail page (visible for all device types). Events for today and tomorrow are fetched and cached in memory, keyed by calendar name set. CalDAV fetches are synchronous (caldav library) wrapped in `run_in_executor`. Credentials stored in `/home/pi/.device-radar.env` as `APPLE_ID_EMAIL` and `APPLE_ID_APP_PASSWORD` (app-specific password from Apple).
+Available calendars are discovered automatically from the iCloud account via CalDAV and cached in memory. Per-device calendar selection is stored in the `calendar_calendars` column (JSON array of calendar names), configured via checkboxes in a dedicated Calendar card on the device detail page (visible for all device types). Events for today and tomorrow are fetched and cached in memory, keyed by calendar name set. CalDAV fetches are synchronous (caldav library) wrapped in `run_in_executor`. Credentials stored in `/home/pi/.device-radar.env` as `APPLE_ID_EMAIL` and `APPLE_ID_APP_PASSWORD` (app-specific password from Apple).
 
 ## WiFi Departure Confirmation
 
