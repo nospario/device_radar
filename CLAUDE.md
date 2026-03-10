@@ -117,7 +117,13 @@ Presence queries use the REST API (`localhost:8080`) where possible and fall bac
     "richard": "Richard's iPhone",
     "laura": "Laura's iPhone"
   },
-  "system_prompt": "You are a helpful assistant running locally on a Raspberry Pi at home. Keep responses concise and conversational — aim for 2-3 sentences unless asked for more detail."
+  "system_prompt": "You are a helpful assistant running locally on a Raspberry Pi at home. Keep responses concise and conversational — aim for 2-3 sentences unless asked for more detail.",
+  "calendar_enabled": true,
+  "calendar_url": "https://caldav.icloud.com",
+  "calendar_username_env": "APPLE_ID_EMAIL",
+  "calendar_password_env": "APPLE_ID_APP_PASSWORD",
+  "calendar_names": ["Our Joint Calendar", "Work", "My Home", "Lilou's Sporting Calendar"],
+  "calendar_cache_minutes": 15
 }
 ```
 
@@ -132,7 +138,7 @@ Flask app on port 8080 with dark theme.
 
 ### Pages
 - **Dashboard** (`/`) — live device list with stats, filters, watchlist/notify toggles
-- **Device Detail** (`/device/<mac>`) — info, settings, linking, event history, proximity Alexa config (BLE devices only)
+- **Device Detail** (`/device/<mac>`) — info, settings, linking, event history, proximity Alexa config (BLE devices only), calendar selection (all devices)
 - **History** (`/history`) — filterable paginated event log
 - **Pairing** (`/pairing`) — pair/unpair via web UI
 
@@ -170,7 +176,7 @@ Config keys in `config.json`:
 - `calendar_names` — list of calendar names to show as options on device detail pages
 - `calendar_cache_minutes` — how long to cache events in memory (default: 15)
 
-Per-device calendar selection is stored in the `calendar_calendars` column (JSON array of calendar names), configured via checkboxes on the device detail page within the Proximity Alexa section. Events for today and tomorrow are fetched and cached in memory, keyed by calendar name set. CalDAV fetches are synchronous (caldav library) wrapped in `run_in_executor`. Credentials stored in `/home/pi/.device-radar.env` as `APPLE_ID_EMAIL` and `APPLE_ID_APP_PASSWORD` (app-specific password from Apple).
+Per-device calendar selection is stored in the `calendar_calendars` column (JSON array of calendar names), configured via checkboxes in a dedicated Calendar card on the device detail page (visible for all device types). Events for today and tomorrow are fetched and cached in memory, keyed by calendar name set. CalDAV fetches are synchronous (caldav library) wrapped in `run_in_executor`. Credentials stored in `/home/pi/.device-radar.env` as `APPLE_ID_EMAIL` and `APPLE_ID_APP_PASSWORD` (app-specific password from Apple).
 
 ## WiFi Departure Confirmation
 
@@ -225,6 +231,8 @@ httpx>=0.25.0
 flask>=3.0.0
 python-telegram-bot>=21.0
 python-dotenv>=1.0.0
+caldav>=1.3.0
+vobject>=0.9.6
 ```
 
 Install: `pip install -r requirements.txt --break-system-packages`
