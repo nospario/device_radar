@@ -211,6 +211,76 @@ def _map_pihole_query_type(qtype: Any) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Ingestion filtering — skip non-browsing noise
+# ---------------------------------------------------------------------------
+
+# Domain suffixes that are never real browsing
+_SKIP_DOMAIN_SUFFIXES = (
+    ".in-addr.arpa",
+    ".ip6.arpa",
+    ".lan",
+    ".local",
+    ".ultrahub",
+    ".resolver.arpa",
+)
+
+# Exact root domains that are infrastructure, not browsing
+_SKIP_ROOT_DOMAINS = {
+    # Reverse DNS / service discovery
+    "in-addr.arpa", "ip6.arpa", "resolver.arpa", "_udp.lan", "_udp.ultrahub",
+    # Apple infrastructure (not user-initiated browsing)
+    "apple-dns.net", "aaplimg.com", "mzstatic.com", "apple-cloudkit.com",
+    "push.apple.com", "icloud-content.com",
+    # CDN / infrastructure (the actual site shows up as a separate query)
+    "akadns.net", "akamai.net", "akamaiedge.net", "akamaized.net",
+    "edgesuite.net", "edgekey.net",
+    "cloudfront.net", "amazonaws.com", "awsglobalaccelerator.com",
+    "azureedge.net", "trafficmanager.net", "azure.com", "msedge.net",
+    "cloudflare.net", "cloudflare-dns.com",
+    "fastly.net", "fastlylb.net",
+    "googleusercontent.com", "googlesyndication.com", "gstatic.com",
+    "googleapis.com", "gvt1.com", "gvt2.com",
+    # Ad tracking / telemetry
+    "doubleclick.net", "googletag.com", "googletagmanager.com",
+    "googleadservices.com", "google-analytics.com",
+    "nr-data.net", "newrelic.com",
+    "sentry.io", "sentry-cdn.com",
+    "app-measurement.com", "crashlytics.com",
+    "appsflyer.com", "adjust.com", "branch.io",
+    "scorecardresearch.com", "quantserve.com",
+    # Connectivity checks / OS plumbing
+    "msftconnecttest.com", "msftncsi.com",
+    "connectivitycheck.gstatic.com",
+    "captive.apple.com",
+    # Certificate / OCSP
+    "ocsp.apple.com", "crl.apple.com",
+    "ocsp.digicert.com", "ocsp.sectigo.com",
+    "ocsp.pki.goog",
+    # NTP / time
+    "ntp.org",
+}
+
+# Only ingest these query types (actual address lookups)
+_ALLOWED_QUERY_TYPES = {"A", "AAAA", "HTTPS"}
+
+
+def _should_skip_query(domain: str, root_domain: str, query_type: str) -> bool:
+    """Return True if this query is infrastructure noise, not browsing."""
+    # Skip non-address query types (PTR, SRV, SOA, TXT, etc.)
+    if query_type not in _ALLOWED_QUERY_TYPES:
+        return True
+    # Skip known noise domain suffixes
+    domain_lower = domain.lower()
+    for suffix in _SKIP_DOMAIN_SUFFIXES:
+        if domain_lower.endswith(suffix):
+            return True
+    # Skip known infrastructure root domains
+    if root_domain.lower() in _SKIP_ROOT_DOMAINS:
+        return True
+    return False
+
+
+# ---------------------------------------------------------------------------
 # Ingestion loop
 # ---------------------------------------------------------------------------
 
@@ -285,6 +355,11 @@ def _ingest_queries(
 
         domain = q["domain"]
         root_domain = _normalise_domain(domain)
+        query_type = q.get("query_type", "A")
+
+        if _should_skip_query(domain, root_domain, query_type):
+            continue
+
         category = get_category(conn, root_domain)
 
         try:
