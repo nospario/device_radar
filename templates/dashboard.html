@@ -23,6 +23,17 @@
         <div class="stat-value" id="stat-events">--</div>
         <div class="stat-label">Events Today</div>
     </div>
+    <div class="stat-card dns-toggle-card" id="dns-toggle-card">
+        <div class="dns-toggle-status">
+            <span class="dns-indicator" id="dns-indicator"></span>
+            <span class="stat-value" id="dns-mode-label" style="font-size:1rem;">--</span>
+        </div>
+        <div class="stat-label">DNS Resolver</div>
+        <button class="btn btn-sm dns-toggle-btn" id="dns-toggle-btn"
+                onclick="toggleDns()" style="margin-top:0.4rem;" disabled>
+            Switch
+        </button>
+    </div>
 </div>
 
 <div class="section">

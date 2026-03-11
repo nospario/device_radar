@@ -1,0 +1,111 @@
+{% extends "base.html" %}
+{% block title %}DNS Traffic - Device Radar{% endblock %}
+
+{% block content %}
+{% if not dns_enabled %}
+<div class="pairing-note">
+    DNS monitoring is not enabled. Set <code>"dns_monitor_enabled": true</code> in config.json and restart the scanner.
+</div>
+{% endif %}
+
+<div class="stats-row" id="traffic-stats-row">
+    <div class="stat-card">
+        <div class="stat-value" id="stat-total-queries">--</div>
+        <div class="stat-label">Queries Today</div>
+    </div>
+    <div class="stat-card stat-detected">
+        <div class="stat-value" id="stat-unique-domains">--</div>
+        <div class="stat-label">Unique Domains</div>
+    </div>
+    <div class="stat-card stat-watch">
+        <div class="stat-value" id="stat-top-domain">--</div>
+        <div class="stat-label">Top Domain</div>
+    </div>
+    <div class="stat-card stat-lost">
+        <div class="stat-value" id="stat-blocked">--</div>
+        <div class="stat-label">Blocked</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-value" id="stat-active-alerts">--</div>
+        <div class="stat-label">Active Alerts</div>
+    </div>
+</div>
+
+<div class="section">
+    <div class="section-header">
+        <h2>DNS Queries</h2>
+        <div class="filters">
+            <select id="traffic-filter-time" class="col-filter" style="width:auto;">
+                <option value="1h">Last Hour</option>
+                <option value="6h">Last 6 Hours</option>
+                <option value="today" selected>Today</option>
+                <option value="yesterday">Yesterday</option>
+                <option value="7d">Last 7 Days</option>
+            </select>
+            <select id="traffic-filter-device" class="col-filter" style="width:auto;">
+                <option value="">All Devices</option>
+                {% for d in tracked_devices %}
+                <option value="{{ d.mac_address }}">{{ d.friendly_name or d.advertised_name or d.mac_address }}</option>
+                {% endfor %}
+            </select>
+            <input type="text" id="traffic-filter-domain" class="col-filter"
+                   placeholder="Search domain..." style="width:150px;">
+            <select id="traffic-filter-category" class="col-filter" style="width:auto;">
+                <option value="">All Categories</option>
+                <option value="Social Media">Social Media</option>
+                <option value="Entertainment">Entertainment</option>
+                <option value="News">News</option>
+                <option value="Productivity">Productivity</option>
+                <option value="Shopping">Shopping</option>
+                <option value="Search">Search</option>
+                <option value="Other">Other</option>
+            </select>
+            <select id="traffic-filter-status" class="col-filter" style="width:auto;">
+                <option value="">All Status</option>
+                <option value="forwarded">Forwarded</option>
+                <option value="cached">Cached</option>
+                <option value="blocked">Blocked</option>
+            </select>
+            <button class="btn btn-sm" onclick="exportTrafficCsv()">Export CSV</button>
+        </div>
+    </div>
+
+    <div class="table-wrap">
+        <table class="device-table" id="traffic-table">
+            <thead>
+                <tr>
+                    <th>Time</th>
+                    <th>Device</th>
+                    <th>Domain</th>
+                    <th>Category</th>
+                    <th>Status</th>
+                    <th>Upstream</th>
+                </tr>
+            </thead>
+            <tbody id="traffic-tbody">
+                <tr><td colspan="6" class="loading">Loading...</td></tr>
+            </tbody>
+        </table>
+    </div>
+
+    <div class="pagination" id="traffic-pagination">
+        <button class="btn btn-sm" id="traffic-btn-prev" disabled>Previous</button>
+        <span id="traffic-page-info">Page 1</span>
+        <button class="btn btn-sm" id="traffic-btn-next">Next</button>
+    </div>
+</div>
+
+<div class="section">
+    <h2>Top Domains</h2>
+    <div style="max-width:700px; margin:0 auto;">
+        <canvas id="top-domains-chart" height="300"></canvas>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+<script>
+    initTrafficPage();
+</script>
+{% endblock %}

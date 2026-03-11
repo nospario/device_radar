@@ -162,6 +162,13 @@
                     </label>
                 </div>
                 <div class="form-group">
+                    <label class="checkbox-label">
+                        <input type="checkbox" id="dns-tracking-enabled"
+                               {% if device.dns_tracking_enabled %}checked{% endif %}>
+                        Track DNS activity (monitor browsing via Pi-hole)
+                    </label>
+                </div>
+                <div class="form-group">
                     <label for="alexa-voice">Alexa Voice</label>
                     <select id="alexa-voice">
                         <option value="" {% if not device.alexa_voice %}selected{% endif %}>Default (Alexa)</option>
@@ -293,6 +300,120 @@
             </form>
         </div>
         {% endif %}
+
+        {% if device.dns_tracking_enabled %}
+        <div class="detail-card">
+            <h3>Browsing Alerts</h3>
+            <p class="text-dim" style="font-size:0.8rem; margin-bottom:0.75rem;">
+                Get notified when sustained browsing is detected on specific websites.
+            </p>
+
+            <div id="alerts-list">
+                {% if device_alerts %}
+                <table class="event-table" style="margin-bottom:1rem;">
+                    <thead>
+                        <tr>
+                            <th>Domain</th>
+                            <th>Threshold</th>
+                            <th>Cooldown</th>
+                            <th>Via</th>
+                            <th>Status</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for alert in device_alerts %}
+                        <tr>
+                            <td>{{ alert.domain }}</td>
+                            <td>{{ alert.threshold_minutes }}m</td>
+                            <td>{{ alert.cooldown_minutes }}m</td>
+                            <td>{{ alert.alert_type }}</td>
+                            <td>
+                                <button class="notify-toggle {{ 'active' if alert.is_active else '' }}"
+                                        onclick="toggleAlert('{{ device.mac_address }}', {{ alert.id }}, {{ 0 if alert.is_active else 1 }})">
+                                    {{ 'Active' if alert.is_active else 'Off' }}
+                                </button>
+                            </td>
+                            <td>
+                                <button class="btn btn-sm btn-unlink" onclick="deleteAlert('{{ device.mac_address }}', {{ alert.id }})">Delete</button>
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+                {% else %}
+                <p class="text-dim" style="font-size:0.85rem; margin-bottom:0.75rem;">No alerts configured.</p>
+                {% endif %}
+            </div>
+
+            <details id="add-alert-section">
+                <summary class="btn btn-sm" style="cursor:pointer; margin-bottom:0.75rem;">Add Alert</summary>
+                <form id="alert-form" class="device-form">
+                    <div class="form-group">
+                        <label for="alert-domain">Domain</label>
+                        <input type="text" id="alert-domain" placeholder="e.g. instagram.com" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="alert-threshold">Time Threshold (minutes)</label>
+                        <input type="number" id="alert-threshold" value="5" min="1" max="120">
+                    </div>
+                    <div class="form-group">
+                        <label for="alert-cooldown">Cooldown (minutes)</label>
+                        <input type="number" id="alert-cooldown" value="30" min="5" max="1440">
+                    </div>
+                    <div class="form-group">
+                        <label for="alert-type">Alert Via</label>
+                        <select id="alert-type">
+                            <option value="alexa">Alexa</option>
+                            <option value="telegram">Telegram</option>
+                            <option value="ntfy">ntfy</option>
+                            <option value="all">All</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label class="checkbox-label">
+                            <input type="checkbox" id="alert-use-ollama" checked>
+                            Dynamic messages (Ollama)
+                        </label>
+                    </div>
+                    <div class="form-group" id="alert-custom-msg-group" style="display:none;">
+                        <label for="alert-custom-message">Custom Message</label>
+                        <input type="text" id="alert-custom-message"
+                               placeholder="Stop browsing {domain} and get back to work!">
+                    </div>
+                    <button type="submit" class="btn btn-primary">Save Alert</button>
+                    <span id="alert-save-status" class="save-status"></span>
+                </form>
+            </details>
+
+            {% if alert_history %}
+            <details style="margin-top:1rem;">
+                <summary class="text-dim" style="cursor:pointer; font-size:0.85rem;">Recent Alert History</summary>
+                <table class="event-table" style="margin-top:0.5rem;">
+                    <thead>
+                        <tr>
+                            <th>Time</th>
+                            <th>Domain</th>
+                            <th>Duration</th>
+                            <th>Message</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for h in alert_history %}
+                        <tr>
+                            <td data-timestamp="{{ h.triggered_at }}">{{ h.triggered_at }}</td>
+                            <td>{{ h.domain }}</td>
+                            <td>{{ h.browsing_duration_mins | round(1) }}m</td>
+                            <td style="max-width:300px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;"
+                                title="{{ h.message }}">{{ h.message }}</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </details>
+            {% endif %}
+        </div>
+        {% endif %}
     </div>
 
     <div class="section">
@@ -334,6 +455,9 @@
         { mac: "{{ d.mac_address }}", label: "{{ (d.friendly_name or d.advertised_name or d.mac_address)|e }} ({{ d.scan_type }})" },
         {% endfor %}
     ]);
+    {% endif %}
+    {% if device.dns_tracking_enabled %}
+    initAlertForm("{{ device.mac_address }}");
     {% endif %}
 </script>
 {% endblock %}

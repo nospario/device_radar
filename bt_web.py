@@ -7,16 +7,18 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import subprocess
 import time as _time
 from pathlib import Path
 from typing import Any
 
 import httpx
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, Response, jsonify, render_template, request
 
 import bt_alexa
 import bt_calendar
 import bt_db
+import bt_dns
 import bt_news
 import bt_pair
 
@@ -109,12 +111,22 @@ def device_detail(mac: str):
     except (json.JSONDecodeError, TypeError):
         device_news_feeds = []
 
+    # DNS tracking alerts (only if enabled for this device)
+    device_alerts = []
+    alert_history = []
+    if device.get("dns_tracking_enabled"):
+        conn2 = get_conn()
+        device_alerts = bt_dns.get_device_alerts(conn2, mac)
+        alert_history = bt_dns.get_alert_history(conn2, device_mac=mac, limit=10)
+        conn2.close()
+
     return render_template(
         "device.html", device=device, events=events,
         link_group=link_group, linkable=linkable,
         custom_types=custom_types, echo_devices=echo_devices,
         calendar_names=calendar_names, device_calendars=device_calendars,
         news_feeds=news_feeds, device_news_feeds=device_news_feeds,
+        device_alerts=device_alerts, alert_history=alert_history,
         active="",
     )
 
@@ -134,6 +146,18 @@ def alexa():
     config = load_config()
     alexa_enabled = config.get("alexa_enabled", False)
     return render_template("alexa.html", active="alexa", alexa_enabled=alexa_enabled)
+
+
+@app.route("/traffic")
+def traffic():
+    config = load_config()
+    dns_enabled = config.get("dns_monitor_enabled", False)
+    conn = get_conn()
+    tracked_devices = bt_dns.get_tracked_devices(conn)
+    conn.close()
+    return render_template("traffic.html", active="traffic",
+                           dns_enabled=dns_enabled,
+                           tracked_devices=tracked_devices)
 
 
 @app.route("/assistant")
@@ -225,6 +249,8 @@ def api_update_device(mac: str):
         kwargs["news_feeds"] = data["news_feeds"]
     if "alexa_voice" in data:
         kwargs["alexa_voice"] = data["alexa_voice"]
+    if "dns_tracking_enabled" in data:
+        kwargs["dns_tracking_enabled"] = bool(data["dns_tracking_enabled"])
 
     updated = bt_db.update_device(conn, mac, **kwargs)
     conn.close()
@@ -551,6 +577,344 @@ def api_assistant_speak():
         return jsonify({"ok": False, "error": str(exc)}), 500
 
     return jsonify({"ok": success})
+
+
+# ---------------------------------------------------------------------------
+# DNS Traffic API
+# ---------------------------------------------------------------------------
+
+@app.route("/api/traffic")
+def api_traffic():
+    conn = get_conn()
+    device_mac = request.args.get("device_mac")
+    domain = request.args.get("domain")
+    category = request.args.get("category")
+    status = request.args.get("status")
+    from_ts = request.args.get("from")
+    to_ts = request.args.get("to")
+    limit = min(int(request.args.get("limit", 50)), 200)
+    offset = int(request.args.get("offset", 0))
+
+    queries, total = bt_dns.get_dns_queries(
+        conn,
+        device_mac=device_mac or None,
+        domain=domain or None,
+        category=category or None,
+        status=status or None,
+        from_ts=float(from_ts) if from_ts else None,
+        to_ts=float(to_ts) if to_ts else None,
+        limit=limit,
+        offset=offset,
+    )
+    conn.close()
+    return jsonify({"queries": queries, "total": total})
+
+
+@app.route("/api/traffic/stats")
+def api_traffic_stats():
+    conn = get_conn()
+    device_mac = request.args.get("device_mac")
+    from_ts = request.args.get("from")
+    to_ts = request.args.get("to")
+
+    stats = bt_dns.get_traffic_stats(
+        conn,
+        device_mac=device_mac or None,
+        from_ts=float(from_ts) if from_ts else None,
+        to_ts=float(to_ts) if to_ts else None,
+    )
+    conn.close()
+    return jsonify(stats)
+
+
+@app.route("/api/traffic/top-domains")
+def api_traffic_top_domains():
+    conn = get_conn()
+    device_mac = request.args.get("device_mac")
+    from_ts = request.args.get("from")
+    to_ts = request.args.get("to")
+    limit = min(int(request.args.get("limit", 10)), 50)
+
+    domains = bt_dns.get_top_domains(
+        conn,
+        device_mac=device_mac or None,
+        from_ts=float(from_ts) if from_ts else None,
+        to_ts=float(to_ts) if to_ts else None,
+        limit=limit,
+    )
+    conn.close()
+    return jsonify({"domains": domains})
+
+
+@app.route("/api/traffic/export")
+def api_traffic_export():
+    conn = get_conn()
+    csv_data = bt_dns.export_queries_csv(
+        conn,
+        device_mac=request.args.get("device_mac") or None,
+        domain=request.args.get("domain") or None,
+        category=request.args.get("category") or None,
+        status=request.args.get("status") or None,
+        from_ts=float(request.args["from"]) if request.args.get("from") else None,
+        to_ts=float(request.args["to"]) if request.args.get("to") else None,
+    )
+    conn.close()
+    from flask import Response
+    return Response(
+        csv_data,
+        mimetype="text/csv",
+        headers={"Content-Disposition": "attachment; filename=dns_traffic.csv"},
+    )
+
+
+# ---------------------------------------------------------------------------
+# DNS Alerts API
+# ---------------------------------------------------------------------------
+
+@app.route("/api/devices/<path:mac>/alerts")
+def api_device_alerts(mac: str):
+    conn = get_conn()
+    alerts = bt_dns.get_device_alerts(conn, mac)
+    conn.close()
+    return jsonify(alerts)
+
+
+@app.route("/api/devices/<path:mac>/alerts", methods=["POST"])
+def api_create_device_alert(mac: str):
+    data = request.get_json()
+    if not data or "domain" not in data:
+        return jsonify({"error": "domain required"}), 400
+
+    conn = get_conn()
+    alert_id = bt_dns.create_alert(
+        conn, mac,
+        domain=data["domain"],
+        threshold_minutes=int(data.get("threshold_minutes", 5)),
+        cooldown_minutes=int(data.get("cooldown_minutes", 30)),
+        alert_type=data.get("alert_type", "alexa"),
+        use_ollama=data.get("use_ollama", True),
+        custom_message=data.get("custom_message"),
+    )
+    conn.close()
+    return jsonify({"ok": True, "id": alert_id})
+
+
+@app.route("/api/devices/<path:mac>/alerts/<int:alert_id>", methods=["PATCH"])
+def api_update_device_alert(mac: str, alert_id: int):
+    data = request.get_json()
+    if not data:
+        return jsonify({"error": "no data"}), 400
+
+    conn = get_conn()
+    updated = bt_dns.update_alert(conn, alert_id, **data)
+    conn.close()
+    if not updated:
+        return jsonify({"error": "not found"}), 404
+    return jsonify({"ok": True})
+
+
+@app.route("/api/devices/<path:mac>/alerts/<int:alert_id>", methods=["DELETE"])
+def api_delete_device_alert(mac: str, alert_id: int):
+    conn = get_conn()
+    deleted = bt_dns.delete_alert(conn, alert_id)
+    conn.close()
+    if not deleted:
+        return jsonify({"error": "not found"}), 404
+    return jsonify({"ok": True})
+
+
+@app.route("/api/devices/<path:mac>/alerts/history")
+def api_device_alert_history(mac: str):
+    limit = min(int(request.args.get("limit", 10)), 50)
+    conn = get_conn()
+    history = bt_dns.get_alert_history(conn, device_mac=mac, limit=limit)
+    conn.close()
+    return jsonify(history)
+
+
+@app.route("/api/devices/<path:mac>/dns-activity")
+def api_device_dns_activity(mac: str):
+    limit = min(int(request.args.get("limit", 20)), 200)
+    from_ts = request.args.get("from")
+    to_ts = request.args.get("to")
+    conn = get_conn()
+    queries, total = bt_dns.get_dns_queries(
+        conn, device_mac=mac,
+        from_ts=float(from_ts) if from_ts else None,
+        to_ts=float(to_ts) if to_ts else None,
+        limit=limit,
+    )
+    conn.close()
+    return jsonify({"queries": queries, "total": total})
+
+
+# ---------------------------------------------------------------------------
+# Domain Categories API
+# ---------------------------------------------------------------------------
+
+@app.route("/api/dns/categories")
+def api_dns_categories():
+    conn = get_conn()
+    categories = bt_dns.get_all_categories(conn)
+    conn.close()
+    return jsonify(categories)
+
+
+@app.route("/api/dns/categories", methods=["POST"])
+def api_dns_category_upsert():
+    data = request.get_json()
+    if not data or "domain" not in data or "category" not in data:
+        return jsonify({"error": "domain and category required"}), 400
+    conn = get_conn()
+    bt_dns.upsert_category(conn, data["domain"], data["category"])
+    conn.close()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/dns/categories/<path:domain>", methods=["DELETE"])
+def api_dns_category_delete(domain: str):
+    conn = get_conn()
+    deleted = bt_dns.delete_category(conn, domain)
+    conn.close()
+    if not deleted:
+        return jsonify({"error": "not found"}), 404
+    return jsonify({"ok": True})
+
+
+# ---------------------------------------------------------------------------
+# DNS Resolver Toggle API
+# ---------------------------------------------------------------------------
+
+def _get_wifi_connection() -> str | None:
+    """Get the active WiFi NetworkManager connection name."""
+    try:
+        result = subprocess.run(
+            ["nmcli", "-t", "-f", "NAME,DEVICE,TYPE", "connection", "show", "--active"],
+            capture_output=True, text=True, timeout=5,
+        )
+        for line in result.stdout.strip().splitlines():
+            parts = line.split(":")
+            if len(parts) >= 3 and parts[2] == "802-11-wireless":
+                return parts[0]
+    except Exception:
+        logger.debug("Could not detect WiFi connection name", exc_info=True)
+    return None
+
+
+def _get_dns_status() -> dict[str, Any]:
+    """Get the current DNS resolver configuration."""
+    status: dict[str, Any] = {
+        "mode": "router",  # "pihole" or "router"
+        "dns_servers": [],
+        "connection": None,
+        "pihole_ftl_active": False,
+    }
+
+    # Check Pi-hole FTL service
+    try:
+        result = subprocess.run(
+            ["systemctl", "is-active", "pihole-FTL"],
+            capture_output=True, text=True, timeout=5,
+        )
+        status["pihole_ftl_active"] = result.stdout.strip() == "active"
+    except Exception:
+        pass
+
+    # Get active WiFi connection DNS
+    conn_name = _get_wifi_connection()
+    status["connection"] = conn_name
+
+    if conn_name:
+        try:
+            result = subprocess.run(
+                ["nmcli", "-t", "-f", "ipv4.dns,ipv4.ignore-auto-dns",
+                 "connection", "show", conn_name],
+                capture_output=True, text=True, timeout=5,
+            )
+            for line in result.stdout.strip().splitlines():
+                if line.startswith("ipv4.dns:"):
+                    dns_val = line.split(":", 1)[1].strip()
+                    if dns_val and dns_val != "--":
+                        status["dns_servers"] = [s.strip() for s in dns_val.split(",") if s.strip()]
+                elif line.startswith("ipv4.ignore-auto-dns:"):
+                    val = line.split(":", 1)[1].strip()
+                    if val == "yes" and any(
+                        s in ("127.0.0.1", "::1") for s in status["dns_servers"]
+                    ):
+                        status["mode"] = "pihole"
+        except Exception:
+            logger.debug("Could not read DNS config", exc_info=True)
+
+    # If no manual DNS set, get the auto-assigned ones
+    if not status["dns_servers"]:
+        try:
+            result = subprocess.run(
+                ["nmcli", "dev", "show"],
+                capture_output=True, text=True, timeout=5,
+            )
+            for line in result.stdout.splitlines():
+                if "IP4.DNS" in line:
+                    dns_val = line.split(":", 1)[1].strip()
+                    if dns_val:
+                        status["dns_servers"].append(dns_val)
+        except Exception:
+            pass
+
+    return status
+
+
+@app.route("/api/dns/status")
+def api_dns_status():
+    """Get current DNS resolver configuration."""
+    return jsonify(_get_dns_status())
+
+
+@app.route("/api/dns/toggle", methods=["POST"])
+def api_dns_toggle():
+    """Toggle DNS between Pi-hole (127.0.0.1) and router (auto)."""
+    data = request.get_json()
+    if not data or "mode" not in data:
+        return jsonify({"error": "mode required (pihole or router)"}), 400
+
+    mode = data["mode"]
+    if mode not in ("pihole", "router"):
+        return jsonify({"error": "mode must be 'pihole' or 'router'"}), 400
+
+    conn_name = _get_wifi_connection()
+    if not conn_name:
+        return jsonify({"error": "no active WiFi connection found"}), 400
+
+    try:
+        if mode == "pihole":
+            # Set DNS to localhost (Pi-hole) and ignore router DNS
+            subprocess.run(
+                ["sudo", "nmcli", "connection", "modify", conn_name,
+                 "ipv4.dns", "127.0.0.1", "ipv4.ignore-auto-dns", "yes"],
+                capture_output=True, text=True, timeout=10, check=True,
+            )
+        else:
+            # Remove manual DNS and use router's auto DNS
+            subprocess.run(
+                ["sudo", "nmcli", "connection", "modify", conn_name,
+                 "ipv4.dns", "", "ipv4.ignore-auto-dns", "no"],
+                capture_output=True, text=True, timeout=10, check=True,
+            )
+
+        # Reactivate the connection to apply changes
+        subprocess.run(
+            ["sudo", "nmcli", "connection", "up", conn_name],
+            capture_output=True, text=True, timeout=15,
+        )
+
+        logger.info("DNS mode switched to %s", mode)
+        return jsonify({"ok": True, "mode": mode})
+
+    except subprocess.CalledProcessError as e:
+        logger.error("Failed to toggle DNS: %s", e.stderr)
+        return jsonify({"error": f"nmcli failed: {e.stderr.strip()}"}), 500
+    except Exception as e:
+        logger.error("DNS toggle error: %s", e)
+        return jsonify({"error": str(e)}), 500
 
 
 # ---------------------------------------------------------------------------
