@@ -91,15 +91,14 @@ def _resolve_mac_to_device(
     dev = bt_db.get_device(conn, mac)
     if not dev:
         return None
-    if not dev.get("dns_tracking_enabled"):
-        return None
-    # If this is a secondary, resolve to primary
+    # If this is a secondary, resolve to primary first
     if dev.get("linked_to"):
         primary = bt_db.get_device(conn, dev["linked_to"])
         if primary and primary.get("dns_tracking_enabled"):
             return primary["mac_address"]
-        # If primary is not tracked but this device is, use this device
-        return mac
+        # Primary not tracked — fall through to check this device
+    if not dev.get("dns_tracking_enabled"):
+        return None
     return mac
 
 
