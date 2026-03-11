@@ -807,6 +807,66 @@ def get_top_domains(
     return [dict(r) for r in rows]
 
 
+def get_domain_summary(
+    conn: sqlite3.Connection,
+    *,
+    device_mac: str | None = None,
+    domain: str | None = None,
+    category: str | None = None,
+    from_ts: float | None = None,
+    to_ts: float | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> tuple[list[dict[str, Any]], int]:
+    """Get aggregated domain summary — one row per domain with query count,
+    first/last seen, and device info. Returns (domains, total_count)."""
+    clauses: list[str] = []
+    params: list[Any] = []
+
+    if device_mac:
+        clauses.append("q.device_mac = ?")
+        params.append(device_mac.upper())
+    if domain:
+        clauses.append("(q.root_domain LIKE ? OR q.full_domain LIKE ?)")
+        params.extend([f"%{domain}%", f"%{domain}%"])
+    if category:
+        clauses.append("q.category = ?")
+        params.append(category)
+    if from_ts:
+        clauses.append("q.timestamp >= ?")
+        params.append(from_ts)
+    if to_ts:
+        clauses.append("q.timestamp <= ?")
+        params.append(to_ts)
+
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+
+    # Count unique domains
+    total = conn.execute(
+        f"SELECT COUNT(DISTINCT q.root_domain) as cnt FROM dns_queries q {where}",
+        list(params),
+    ).fetchone()["cnt"]
+
+    # Fetch aggregated page
+    page_params = list(params)
+    page_params.extend([limit, offset])
+    rows = conn.execute(f"""
+        SELECT q.root_domain, q.category,
+               COUNT(*) as query_count,
+               MIN(q.timestamp) as first_seen,
+               MAX(q.timestamp) as last_seen,
+               GROUP_CONCAT(DISTINCT d.friendly_name) as devices
+        FROM dns_queries q
+        LEFT JOIN devices d ON q.device_mac = d.mac_address
+        {where}
+        GROUP BY q.root_domain
+        ORDER BY last_seen DESC
+        LIMIT ? OFFSET ?
+    """, page_params).fetchall()
+
+    return [dict(r) for r in rows], total
+
+
 def export_queries_csv(
     conn: sqlite3.Connection,
     *,

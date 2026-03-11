@@ -33,7 +33,7 @@
 
 <div class="section">
     <div class="section-header">
-        <h2>DNS Queries</h2>
+        <h2>Browsing Activity</h2>
         <div class="filters">
             <select id="traffic-filter-time" class="col-filter" style="width:auto;">
                 <option value="1h">Last Hour</option>
@@ -60,12 +60,6 @@
                 <option value="Search">Search</option>
                 <option value="Other">Other</option>
             </select>
-            <select id="traffic-filter-status" class="col-filter" style="width:auto;">
-                <option value="">All Status</option>
-                <option value="forwarded">Forwarded</option>
-                <option value="cached">Cached</option>
-                <option value="blocked">Blocked</option>
-            </select>
             <button class="btn btn-sm" onclick="exportTrafficCsv()">Export CSV</button>
         </div>
     </div>
@@ -74,12 +68,12 @@
         <table class="device-table" id="traffic-table">
             <thead>
                 <tr>
-                    <th>Time</th>
-                    <th>Device</th>
                     <th>Domain</th>
+                    <th>Queries</th>
                     <th>Category</th>
-                    <th>Status</th>
-                    <th>Upstream</th>
+                    <th>Devices</th>
+                    <th>First Seen</th>
+                    <th>Last Seen</th>
                 </tr>
             </thead>
             <tbody id="traffic-tbody">

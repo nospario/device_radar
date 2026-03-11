@@ -802,8 +802,6 @@ function getTrafficFilters() {
     if (domain && domain.value.trim()) params.set('domain', domain.value.trim());
     const category = document.getElementById('traffic-filter-category');
     if (category && category.value) params.set('category', category.value);
-    const status = document.getElementById('traffic-filter-status');
-    if (status && status.value) params.set('status', status.value);
     return params;
 }
 
@@ -851,35 +849,32 @@ async function loadTrafficQueries() {
         params.set('limit', TRAFFIC_PAGE_SIZE);
         params.set('offset', trafficPage * TRAFFIC_PAGE_SIZE);
 
-        const data = await api(`/api/traffic?${params}`);
+        const data = await api(`/api/traffic/domains?${params}`);
         const tbody = document.getElementById('traffic-tbody');
 
-        if (data.queries.length === 0) {
-            tbody.innerHTML = '<tr><td colspan="6" class="empty">No queries found</td></tr>';
+        if (data.domains.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="6" class="empty">No domains found</td></tr>';
         } else {
-            tbody.innerHTML = data.queries.map(q => {
-                const name = escapeHtml(q.friendly_name || q.advertised_name || q.device_mac || 'Unknown');
-                const deviceLink = q.device_mac
-                    ? `<a href="/device/${encodeURIComponent(q.device_mac)}">${name}</a>`
-                    : name;
+            tbody.innerHTML = data.domains.map(d => {
+                const devices = escapeHtml(d.devices || 'Unknown');
                 return `<tr>
-                    <td title="${formatTime(q.timestamp)}">${timeAgo(q.timestamp)}</td>
-                    <td>${deviceLink}</td>
-                    <td title="${escapeHtml(q.full_domain)}">${escapeHtml(q.root_domain)}</td>
-                    <td>${categoryBadge(q.category)}</td>
-                    <td>${statusBadge(q.status)}</td>
-                    <td>${escapeHtml(q.upstream || '')}</td>
+                    <td><strong>${escapeHtml(d.root_domain)}</strong></td>
+                    <td>${d.query_count.toLocaleString()}</td>
+                    <td>${categoryBadge(d.category)}</td>
+                    <td>${devices}</td>
+                    <td title="${formatTime(d.first_seen)}">${timeAgo(d.first_seen)}</td>
+                    <td title="${formatTime(d.last_seen)}">${timeAgo(d.last_seen)}</td>
                 </tr>`;
             }).join('');
         }
 
         const totalPages = Math.ceil(data.total / TRAFFIC_PAGE_SIZE) || 1;
         document.getElementById('traffic-page-info').textContent =
-            `Page ${trafficPage + 1} of ${totalPages} (${data.total.toLocaleString()} queries)`;
+            `Page ${trafficPage + 1} of ${totalPages} (${data.total.toLocaleString()} domains)`;
         document.getElementById('traffic-btn-prev').disabled = trafficPage === 0;
         document.getElementById('traffic-btn-next').disabled = (trafficPage + 1) >= totalPages;
     } catch (e) {
-        console.error('Failed to load traffic queries:', e);
+        console.error('Failed to load traffic domains:', e);
     }
 }
 

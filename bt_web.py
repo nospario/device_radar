@@ -627,6 +627,31 @@ def api_traffic_stats():
     return jsonify(stats)
 
 
+@app.route("/api/traffic/domains")
+def api_traffic_domains():
+    conn = get_conn()
+    device_mac = request.args.get("device_mac")
+    domain = request.args.get("domain")
+    category = request.args.get("category")
+    from_ts = request.args.get("from")
+    to_ts = request.args.get("to")
+    limit = min(int(request.args.get("limit", 50)), 200)
+    offset = int(request.args.get("offset", 0))
+
+    domains, total = bt_dns.get_domain_summary(
+        conn,
+        device_mac=device_mac or None,
+        domain=domain or None,
+        category=category or None,
+        from_ts=float(from_ts) if from_ts else None,
+        to_ts=float(to_ts) if to_ts else None,
+        limit=limit,
+        offset=offset,
+    )
+    conn.close()
+    return jsonify({"domains": domains, "total": total})
+
+
 @app.route("/api/traffic/top-domains")
 def api_traffic_top_domains():
     conn = get_conn()
