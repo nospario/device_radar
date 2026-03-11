@@ -142,11 +142,10 @@ Presence queries use the REST API (`localhost:8080`) where possible and fall bac
   "news_cache_minutes": 15,
   "dns_monitor_enabled": true,
   "dns_poll_interval_seconds": 30,
-  "dns_pihole_db": "/etc/pihole/pihole-FTL.db",
+  "pihole_ftl_db_path": "/etc/pihole/pihole-FTL.db",
   "dns_data_retention_days": 14,
-  "dns_alert_check_interval_seconds": 60,
-  "dns_session_gap_minutes": 5,
-  "dns_session_threshold_minutes": 10,
+  "alert_check_interval_seconds": 60,
+  "alert_session_gap_minutes": 3,
   "dns_aggregation_hour": 3
 }
 ```
@@ -255,12 +254,24 @@ When a voice is set, the `speak()` function in `bt_alexa.py` wraps the message i
 
 Per-device DNS query tracking via Pi-hole integration. Module: `bt_dns.py`. Opt-in per device via `dns_tracking_enabled` column.
 
+### Pi-hole Infrastructure
+
+Pi-hole v6 runs on the Pi as the network DNS server. Key setup requirements:
+
+- **Pi-hole DHCP enabled** — router DHCP disabled; Pi-hole assigns IPs and tells clients to use itself (`192.168.1.162`) as DNS. This ensures queries arrive with individual device IPs rather than the router's IP.
+- **Apple encrypted DNS blocked** — Pi-hole blocks `mask.icloud.com`, `mask-h2.icloud.com`, `doh.dns.apple.com` via dnsmasq `address=` directives to force Apple devices to use standard DNS on port 53.
+- **IPv6 disabled on router** — prevents router advertising itself as IPv6 DNS server via Router Advertisements, which would cause devices to bypass Pi-hole.
+- **Apple device settings** — iCloud Private Relay and "Limit IP Address Tracking" must be disabled per-device for DNS queries to flow through Pi-hole.
+- **Private Wi-Fi Address** — Apple devices randomise MAC per network; secondary MACs must be linked to the primary device in Device Radar for attribution.
+
+Pi-hole admin interface at `http://192.168.1.162/admin/`. FTL database at `/etc/pihole/pihole-FTL.db`. DHCP leases at `/etc/pihole/dhcp.leases`. Config at `/etc/pihole/pihole.toml`.
+
 ### How It Works
 
-1. **Ingestion loop** polls Pi-hole's FTL SQLite database every `dns_poll_interval_seconds` (default 30) for new queries
-2. **ARP resolution** maps Pi-hole client IPs to Device Radar MAC addresses via `/proc/net/arp`, with in-memory cache (60s TTL)
+1. **Ingestion loop** polls Pi-hole's FTL SQLite database every `dns_poll_interval_seconds` (default 30) for new queries (falls back from v5 API to direct DB read for Pi-hole v6 compatibility)
+2. **ARP resolution** maps Pi-hole client IPs to Device Radar MAC addresses via `/proc/net/arp`, with in-memory cache (300s TTL)
 3. **Domain normalisation** via `tldextract` extracts root domains (handles `.co.uk`, CDN subdomains, etc.)
-4. **Linked device attribution** — queries from secondary devices are attributed to the primary device in the link group
+4. **Linked device attribution** — queries from secondary devices (including private Wi-Fi MACs) are attributed to the primary device in the link group, even if the secondary has `dns_tracking_enabled=0`
 5. **Daily aggregation** runs once per day at `dns_aggregation_hour` (default 3 AM), pre-computing stats for the reporting dashboard
 6. **Data retention** — raw queries older than `dns_data_retention_days` (default 14) are purged during the scanner's cleanup cycle
 
