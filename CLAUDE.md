@@ -32,16 +32,22 @@ Supporting modules:
 | `bt_calendar.py` | Apple Calendar (iCloud CalDAV) integration — event fetching, caching, and prompt context for proximity/welcome messages |
 | `bt_weather.py` | Current weather via Open-Meteo API — fetches temperature and conditions, caches in memory, provides formatted string for Alexa TTS prefix |
 | `bt_news.py` | BBC News RSS headline fetching, per-device read tracking, and spoken suffix formatting for Alexa TTS |
+| `bt_dns.py` | DNS traffic monitoring via Pi-hole — query ingestion, ARP-based IP→MAC resolution, domain categorisation, session detection, browsing alerts, daily stats aggregation |
 
 ## Database
 
 SQLite with WAL mode (`bt_radar.db`). Core tables:
 
-- **devices** — all known devices with state (`DETECTED`/`LOST`), scan info, flags (`is_watchlisted`, `is_notify`, `is_hidden`, `is_paired`), device linking (`linked_to`), proximity alert settings (`proximity_enabled`, `proximity_rssi_threshold`, `proximity_interval`, `proximity_alexa_device`, `proximity_prompt`, `last_proximity_message`), calendar integration (`calendar_calendars` — JSON array of calendar names), news feed selection (`news_feeds` — JSON array of feed keys), and Alexa voice selection (`alexa_voice` — Amazon Polly voice name for SSML)
+- **devices** — all known devices with state (`DETECTED`/`LOST`), scan info, flags (`is_watchlisted`, `is_notify`, `is_hidden`, `is_paired`), device linking (`linked_to`), proximity alert settings (`proximity_enabled`, `proximity_rssi_threshold`, `proximity_interval`, `proximity_alexa_device`, `proximity_prompt`, `last_proximity_message`), calendar integration (`calendar_calendars` — JSON array of calendar names), news feed selection (`news_feeds` — JSON array of feed keys), Alexa voice selection (`alexa_voice` — Amazon Polly voice name for SSML), and DNS tracking opt-in (`dns_tracking_enabled`)
 - **events** — arrival/departure event log with timestamps
 - **news_headlines** — fetched BBC RSS headlines with guid deduplication, feed_key, title, published timestamp
 - **news_read** — per-device read tracking (mac_address + headline_id), ensures headlines aren't repeated
 - **chat_history** — conversation history for Ollama context (Telegram bot uses numeric chat_id, web assistant uses `"web_assistant"`)
+- **dns_queries** — raw Pi-hole DNS queries mapped to devices (device_mac, domain, root_domain, query_type, status, client_ip, timestamp)
+- **dns_daily_stats** — pre-computed daily aggregates per device+domain for reporting performance
+- **domain_categories** — root_domain→category mapping (seeded with 35 common domains; Social Media, Entertainment, Shopping, News, Streaming, Productivity, Gaming)
+- **website_alerts** — per-device browsing alerts with domain, dwell threshold, cooldown, alert channels (alexa/telegram/ntfy), Ollama message toggle
+- **alert_history** — log of triggered browsing alerts with timestamps and messages
 - **migrations** — tracks one-time data migrations
 
 Schema is created/migrated in `bt_db.init_db()`. New columns are added via `_add_column()`. One-time data migrations use `_run_migration()`.
@@ -133,7 +139,15 @@ Presence queries use the REST API (`localhost:8080`) where possible and fall bac
   "weather_cache_minutes": 30,
   "news_enabled": true,
   "news_headline_count": 3,
-  "news_cache_minutes": 15
+  "news_cache_minutes": 15,
+  "dns_monitor_enabled": true,
+  "dns_poll_interval_seconds": 30,
+  "dns_pihole_db": "/etc/pihole/pihole-FTL.db",
+  "dns_data_retention_days": 14,
+  "dns_alert_check_interval_seconds": 60,
+  "dns_session_gap_minutes": 5,
+  "dns_session_threshold_minutes": 10,
+  "dns_aggregation_hour": 3
 }
 ```
 
@@ -147,8 +161,9 @@ On first run, if `config.json` doesn't exist, a default is created and the scrip
 Flask app on port 8080 with dark theme.
 
 ### Pages
-- **Dashboard** (`/`) — live device list with stats, filters, watchlist/notify toggles
-- **Device Detail** (`/device/<mac>`) — info, settings (including Alexa voice selection), linking, event history, proximity Alexa config (BLE devices only), calendar selection, BBC News feed selection (all devices)
+- **Dashboard** (`/`) — live device list with stats, filters, watchlist/notify toggles, DNS resolver toggle
+- **Device Detail** (`/device/<mac>`) — info, settings (including Alexa voice selection, DNS tracking toggle), linking, event history, proximity Alexa config (BLE devices only), calendar selection, BBC News feed selection, browsing alerts (when DNS tracking enabled)
+- **Traffic** (`/traffic`) — DNS traffic dashboard with device filter, time range, server-side paginated query table, Chart.js top domains bar chart, traffic stats
 - **History** (`/history`) — filterable paginated event log
 - **Pairing** (`/pairing`) — pair/unpair via web UI
 - **Assistant** (`/assistant`) — Ollama chat interface with "Read on Alexa" toggle, Echo device/voice selection, persistent conversation history
@@ -167,6 +182,21 @@ Flask app on port 8080 with dark theme.
 - `POST /api/assistant/chat` — send message to Ollama, returns response
 - `DELETE /api/assistant/history` — clear web assistant conversation
 - `POST /api/assistant/speak` — speak text on Alexa device
+- `GET /api/traffic` — paginated DNS queries (filters: device_mac, domain, category, status, time range)
+- `GET /api/traffic/stats` — DNS traffic statistics (total queries, unique domains, blocked, top category)
+- `GET /api/traffic/top-domains` — top domains by query count with Chart.js data
+- `GET /api/traffic/export` — CSV export of DNS queries
+- `GET /api/devices/<mac>/alerts` — browsing alerts for a device
+- `POST /api/devices/<mac>/alerts` — create a browsing alert
+- `PATCH /api/devices/<mac>/alerts/<id>` — update a browsing alert
+- `DELETE /api/devices/<mac>/alerts/<id>` — delete a browsing alert
+- `GET /api/devices/<mac>/alerts/history` — alert trigger history
+- `GET /api/devices/<mac>/dns-activity` — recent DNS activity summary for a device
+- `GET /api/dns/categories` — all domain categories
+- `POST /api/dns/categories` — add/update a domain category
+- `DELETE /api/dns/categories/<domain>` — delete a domain category
+- `GET /api/dns/status` — current DNS resolver status (Pi-hole vs router)
+- `POST /api/dns/toggle` — toggle DNS resolver between Pi-hole and router via nmcli
 
 ## Proximity Alerts
 
@@ -220,6 +250,41 @@ Per-device configurable TTS voice using Amazon Polly SSML voices. Stored in the 
 Available voices: Brian (British male), Amy (British female), Emma (British female), Matthew (US male), Joanna (US female), Kendra (US female). Default is the standard Alexa voice (empty string).
 
 When a voice is set, the `speak()` function in `bt_alexa.py` wraps the message in SSML: `<speak><voice name='Brian'>...</voice></speak>`. Applied to both arrival greetings and proximity alert messages.
+
+## DNS Traffic Monitoring
+
+Per-device DNS query tracking via Pi-hole integration. Module: `bt_dns.py`. Opt-in per device via `dns_tracking_enabled` column.
+
+### How It Works
+
+1. **Ingestion loop** polls Pi-hole's FTL SQLite database every `dns_poll_interval_seconds` (default 30) for new queries
+2. **ARP resolution** maps Pi-hole client IPs to Device Radar MAC addresses via `/proc/net/arp`, with in-memory cache (60s TTL)
+3. **Domain normalisation** via `tldextract` extracts root domains (handles `.co.uk`, CDN subdomains, etc.)
+4. **Linked device attribution** — queries from secondary devices are attributed to the primary device in the link group
+5. **Daily aggregation** runs once per day at `dns_aggregation_hour` (default 3 AM), pre-computing stats for the reporting dashboard
+6. **Data retention** — raw queries older than `dns_data_retention_days` (default 14) are purged during the scanner's cleanup cycle
+
+### Browsing Alerts
+
+Per-device alerts triggered when a device spends sustained time on a specific domain. Configured on the device detail page:
+
+- **Domain** — root domain to monitor (e.g. `instagram.com`)
+- **Dwell threshold** — minutes of sustained browsing before triggering (session detection uses gap/threshold logic)
+- **Cooldown** — minutes between repeated alerts for the same domain
+- **Channels** — alexa, telegram, ntfy (multi-select)
+- **Ollama message** — toggle to generate dynamic alert messages via Ollama
+- **Custom message** — static fallback message template
+
+Session detection: queries to the same domain within `dns_session_gap_minutes` are grouped into sessions. If a session exceeds the configured threshold, the alert fires.
+
+### DNS Resolver Toggle
+
+Dashboard stat card that shows current DNS resolver mode (Pi-hole or Router) and allows toggling. Uses NetworkManager (`nmcli`) to modify the active WiFi connection's `ipv4.dns` setting:
+
+- **Pi-hole mode**: `ipv4.dns 127.0.0.1` + `ipv4.ignore-auto-dns yes`
+- **Router mode**: clears `ipv4.dns` + `ipv4.ignore-auto-dns no` (uses DHCP-provided DNS)
+
+The toggle auto-detects the active WiFi connection name via `nmcli`. Requires `sudo nmcli` permissions.
 
 ## WiFi Departure Confirmation
 
@@ -276,6 +341,7 @@ python-telegram-bot>=21.0
 python-dotenv>=1.0.0
 caldav>=1.3.0
 vobject>=0.9.6
+tldextract>=5.0.0
 ```
 
 Install: `pip install -r requirements.txt --break-system-packages`
@@ -295,6 +361,7 @@ bt-monitor/
 ├── bt_weather.py          # Current weather via Open-Meteo API
 ├── bt_news.py             # BBC News RSS headline integration
 ├── bt_wifi.py             # WiFi/LAN scanning module + targeted ping confirmation
+├── bt_dns.py              # DNS traffic monitoring via Pi-hole integration
 ├── config.json            # User configuration (gitignored)
 ├── bt_radar.db            # SQLite database (auto-created, gitignored)
 ├── requirements.txt       # Python dependencies
@@ -302,7 +369,7 @@ bt-monitor/
 ├── bt-scanner.service     # Systemd unit for scanner
 ├── bt-web.service         # Systemd unit for web dashboard
 ├── bt-telegram.service    # Systemd unit for Telegram bot
-├── templates/             # Jinja2 templates (dashboard, device, history, pairing, assistant)
+├── templates/             # Jinja2 templates (dashboard, device, history, pairing, assistant, traffic)
 ├── static/                # CSS and JS (dark theme)
 └── README.md
 ```
