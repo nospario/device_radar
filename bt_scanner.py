@@ -23,7 +23,6 @@ from bleak.backends.scanner import AdvertisementData
 import bt_alexa
 import bt_classify
 import bt_db
-import bt_dns
 import bt_pair
 import bt_telegram
 import bt_wifi
@@ -407,12 +406,6 @@ class BluetoothRadarScanner:
             hidden = bt_db.hide_stale_random_macs(conn, self.cleanup_hours)
             if hidden:
                 logger.info("Hidden %d stale random-MAC devices", hidden)
-            # Purge old DNS queries
-            if self.config.get("dns_monitor_enabled"):
-                retention = self.config.get("dns_data_retention_days", 14)
-                purged = bt_dns.purge_old_queries(conn, retention)
-                if purged:
-                    logger.info("Purged %d old DNS queries (>%d days)", purged, retention)
 
         conn.close()
 
@@ -662,16 +655,6 @@ class BluetoothRadarScanner:
             asyncio.create_task(
                 bt_alexa.run_encourage_loop(self.config, self.db_path)
             )
-
-        # Start DNS monitoring background tasks
-        if self.config.get("dns_monitor_enabled"):
-            asyncio.create_task(
-                bt_dns.dns_ingestion_loop(self.config, self.db_path)
-            )
-            asyncio.create_task(
-                bt_dns.dns_alert_loop(self.config, self.db_path)
-            )
-            logger.info("DNS monitoring enabled")
 
         while True:
             try:

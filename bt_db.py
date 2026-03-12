@@ -106,9 +106,6 @@ def init_db(db_path: str | Path = DEFAULT_DB_PATH) -> None:
     # Alexa voice (SSML Polly voice name)
     _add_column(conn, "devices", "alexa_voice", "TEXT DEFAULT ''")
 
-    # DNS traffic monitoring opt-in
-    _add_column(conn, "devices", "dns_tracking_enabled", "INTEGER DEFAULT 0")
-
     conn.execute("CREATE INDEX IF NOT EXISTS idx_devices_linked_to ON devices(linked_to)")
 
     # Chat history for Telegram bot conversations
@@ -161,109 +158,12 @@ def init_db(db_path: str | Path = DEFAULT_DB_PATH) -> None:
             ON news_read(mac_address, headline_id);
     """)
 
-    # DNS traffic monitoring tables
-    conn.executescript("""
-        CREATE TABLE IF NOT EXISTS dns_queries (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp   REAL NOT NULL,
-            device_mac  TEXT,
-            client_ip   TEXT,
-            full_domain TEXT NOT NULL,
-            root_domain TEXT NOT NULL,
-            query_type  TEXT DEFAULT 'A',
-            status      TEXT DEFAULT 'forwarded',
-            category    TEXT,
-            upstream    TEXT
-        );
-        CREATE INDEX IF NOT EXISTS idx_dns_queries_ts
-            ON dns_queries(timestamp DESC);
-        CREATE INDEX IF NOT EXISTS idx_dns_queries_device_ts
-            ON dns_queries(device_mac, timestamp DESC);
-        CREATE INDEX IF NOT EXISTS idx_dns_queries_domain_ts
-            ON dns_queries(root_domain, timestamp DESC);
-        CREATE INDEX IF NOT EXISTS idx_dns_queries_device_domain_ts
-            ON dns_queries(device_mac, root_domain, timestamp DESC);
-        CREATE INDEX IF NOT EXISTS idx_dns_queries_category
-            ON dns_queries(category);
-
-        CREATE TABLE IF NOT EXISTS dns_daily_stats (
-            id              INTEGER PRIMARY KEY AUTOINCREMENT,
-            date            TEXT NOT NULL,
-            device_mac      TEXT NOT NULL,
-            root_domain     TEXT NOT NULL,
-            category        TEXT,
-            query_count     INTEGER DEFAULT 0,
-            first_seen      REAL,
-            last_seen       REAL,
-            estimated_minutes REAL DEFAULT 0
-        );
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_dns_daily_stats_key
-            ON dns_daily_stats(date, device_mac, root_domain);
-
-        CREATE TABLE IF NOT EXISTS domain_categories (
-            root_domain TEXT PRIMARY KEY,
-            category    TEXT NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS website_alerts (
-            id                  INTEGER PRIMARY KEY AUTOINCREMENT,
-            device_mac          TEXT NOT NULL,
-            domain              TEXT NOT NULL,
-            threshold_minutes   INTEGER NOT NULL DEFAULT 5,
-            cooldown_minutes    INTEGER NOT NULL DEFAULT 30,
-            alert_type          TEXT NOT NULL DEFAULT 'alexa',
-            use_ollama          INTEGER NOT NULL DEFAULT 1,
-            custom_message      TEXT,
-            is_active           INTEGER NOT NULL DEFAULT 1,
-            created_at          REAL,
-            last_triggered      REAL
-        );
-        CREATE INDEX IF NOT EXISTS idx_website_alerts_device
-            ON website_alerts(device_mac, is_active);
-
-        CREATE TABLE IF NOT EXISTS alert_history (
-            id                      INTEGER PRIMARY KEY AUTOINCREMENT,
-            alert_id                INTEGER,
-            device_mac              TEXT,
-            domain                  TEXT,
-            triggered_at            REAL,
-            message                 TEXT,
-            alert_type              TEXT,
-            browsing_duration_mins  REAL
-        );
-        CREATE INDEX IF NOT EXISTS idx_alert_history_device_ts
-            ON alert_history(device_mac, triggered_at DESC);
-    """)
-
     # One-time data migrations (tracked so they never re-run)
     conn.execute("CREATE TABLE IF NOT EXISTS migrations (name TEXT PRIMARY KEY)")
     _run_migration(conn, "watchlisted_notify_backfill",
                    "UPDATE devices SET is_notify = 1 WHERE is_watchlisted = 1 AND is_notify = 0")
     _run_migration(conn, "rename_state_home_away",
                    "UPDATE devices SET state = CASE WHEN state = 'HOME' THEN 'DETECTED' WHEN state = 'AWAY' THEN 'LOST' ELSE state END")
-    _run_migration(conn, "enable_dns_tracking_richard",
-                   "UPDATE devices SET dns_tracking_enabled = 1 WHERE friendly_name IN (\"Richard's iPhone\", \"Richard's MacBook\")")
-    _run_migration(conn, "seed_domain_categories", """
-        INSERT OR IGNORE INTO domain_categories (root_domain, category) VALUES
-        ('instagram.com', 'Social Media'), ('facebook.com', 'Social Media'),
-        ('twitter.com', 'Social Media'), ('x.com', 'Social Media'),
-        ('tiktok.com', 'Social Media'), ('reddit.com', 'Social Media'),
-        ('linkedin.com', 'Social Media'), ('snapchat.com', 'Social Media'),
-        ('pinterest.com', 'Social Media'), ('threads.net', 'Social Media'),
-        ('youtube.com', 'Entertainment'), ('netflix.com', 'Entertainment'),
-        ('twitch.tv', 'Entertainment'), ('spotify.com', 'Entertainment'),
-        ('disneyplus.com', 'Entertainment'), ('primevideo.com', 'Entertainment'),
-        ('bbc.co.uk', 'News'), ('theguardian.com', 'News'),
-        ('dailymail.co.uk', 'News'), ('sky.com', 'News'),
-        ('telegraph.co.uk', 'News'), ('independent.co.uk', 'News'),
-        ('github.com', 'Productivity'), ('stackoverflow.com', 'Productivity'),
-        ('notion.so', 'Productivity'), ('slack.com', 'Productivity'),
-        ('trello.com', 'Productivity'),
-        ('amazon.co.uk', 'Shopping'), ('amazon.com', 'Shopping'),
-        ('ebay.co.uk', 'Shopping'), ('ebay.com', 'Shopping'),
-        ('google.com', 'Search'), ('google.co.uk', 'Search'),
-        ('bing.com', 'Search'), ('duckduckgo.com', 'Search')
-    """)
     conn.commit()
 
     conn.close()
@@ -385,7 +285,6 @@ def update_device(
     calendar_calendars: str | None = None,
     news_feeds: str | None = None,
     alexa_voice: str | None = None,
-    dns_tracking_enabled: bool | None = None,
 ) -> bool:
     """Update specific fields on a device. Returns True if a row was updated."""
     sets: list[str] = []
@@ -445,9 +344,6 @@ def update_device(
     if alexa_voice is not None:
         sets.append("alexa_voice = ?")
         params.append(alexa_voice)
-    if dns_tracking_enabled is not None:
-        sets.append("dns_tracking_enabled = ?")
-        params.append(int(dns_tracking_enabled))
 
     if not sets:
         return False

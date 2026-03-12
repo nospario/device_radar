@@ -543,46 +543,6 @@ tbody tr:hover { background: var(--bg-hover); }
     vertical-align: middle;
 }
 
-/* DNS toggle card */
-.dns-toggle-card {
-    position: relative;
-}
-.dns-toggle-status {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 0.4rem;
-}
-.dns-indicator {
-    display: inline-block;
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    background: var(--text-dim);
-}
-.dns-indicator.dns-pihole { background: var(--green); }
-.dns-indicator.dns-router { background: var(--yellow); }
-.dns-toggle-btn {
-    font-size: 0.75rem !important;
-    padding: 0.15rem 0.5rem !important;
-}
-
-/* DNS Category badges */
-.category-badge {
-    display: inline-block;
-    padding: 0.15rem 0.5rem;
-    border-radius: 10px;
-    font-size: 0.7rem;
-    font-weight: 600;
-}
-.category-social-media { background: rgba(91, 138, 245, 0.15); color: #5b8af5; }
-.category-entertainment { background: rgba(168, 85, 247, 0.15); color: #a855f7; }
-.category-news { background: rgba(245, 158, 11, 0.15); color: #f59e0b; }
-.category-productivity { background: rgba(52, 199, 89, 0.15); color: #34c759; }
-.category-shopping { background: rgba(255, 214, 10, 0.15); color: #ffd60a; }
-.category-search { background: rgba(139, 144, 160, 0.15); color: #8b90a0; }
-.category-other, .category-uncategorised { background: rgba(107, 114, 128, 0.15); color: #6b7280; }
-
 /* Responsive */
 @media (max-width: 768px) {
     .container { padding: 1rem; }
