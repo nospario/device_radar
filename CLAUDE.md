@@ -84,7 +84,7 @@ Devices can appear with different MACs across scan types (BLE vs WiFi). The `lin
   - "when did Richard arrive", "how long has Laura been away"
   - `/home`, `/devices`, `/lastseen <name>` slash commands
 - **Person resolution** — maps names to devices via `person_aliases` config, then fuzzy-matches `friendly_name`, then resolves link groups
-- **General chat** — forwarded to local Ollama instance (configurable model, default `qwen2.5:1.5b`)
+- **General chat** — forwarded to local Ollama instance (configurable model, default `gemma3:4b`); emoji suppressed via system prompt
 - **Conversation history** — stored in `chat_history` SQLite table, last N messages sent as context
 - **Read-aloud mode** — `/readaloud on [device]` toggles automatic Alexa TTS for chat responses; `/readaloud voice <name>` sets Polly voice; state is in-memory (resets on restart, default off)
 - **Authorization** — only responds to the configured `TELEGRAM_CHAT_ID`
@@ -115,8 +115,8 @@ Presence queries use the REST API (`localhost:8080`) where possible and fall bac
   "telegram_token_env": "TELEGRAM_BOT_TOKEN",
   "telegram_chat_id_env": "TELEGRAM_CHAT_ID",
   "ollama_url": "http://localhost:11434",
-  "ollama_model": "qwen2.5:1.5b",
-  "ollama_timeout_seconds": 15,
+  "ollama_model": "gemma3:4b",
+  "ollama_timeout_seconds": 60,
   "conversation_history_length": 10,
   "person_aliases": {
     "richard": "Richard's iPhone",
