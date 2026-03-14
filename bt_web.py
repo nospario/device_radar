@@ -426,7 +426,7 @@ def _call_ollama_sync(
 ) -> str | None:
     """Call Ollama synchronously (for use in Flask request context)."""
     base_url = config.get("ollama_url", "http://localhost:11434")
-    timeout = config.get("ollama_timeout_seconds", 15)
+    timeout = config.get("ollama_timeout_seconds", 60)
     model = config.get("ollama_model", "qwen2.5:1.5b")
 
     parts: list[str] = []
@@ -456,7 +456,8 @@ def _call_ollama_sync(
             f"{base_url}/api/generate", json=payload, timeout=timeout,
         )
         resp.raise_for_status()
-        return resp.json().get("response", "").strip()
+        result = resp.json().get("response", "").strip()
+        return result or None
     except httpx.TimeoutException:
         logger.warning("Ollama timed out after %ds", timeout)
         return None
