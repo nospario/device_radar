@@ -980,6 +980,7 @@ async def _handle_message(update, context) -> None:
         "You are a helpful assistant running locally on a Raspberry Pi at home. "
         "Keep responses concise and conversational.",
     )
+    system_prompt += " Do not use emoji in your responses."
     messages = [{"role": "system", "content": system_prompt}]
     messages.extend({"role": m["role"], "content": m["content"]} for m in history)
 
