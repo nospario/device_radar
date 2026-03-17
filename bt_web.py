@@ -11,7 +11,6 @@ import time as _time
 from pathlib import Path
 from typing import Any
 
-import httpx
 from flask import Flask, jsonify, render_template, request
 
 import bt_alexa
@@ -19,6 +18,7 @@ import bt_calendar
 import bt_db
 import bt_news
 import bt_pair
+import bt_search
 
 logger = logging.getLogger("bt_web")
 
@@ -421,51 +421,6 @@ def api_delete_echo_device(name: str):
 # Assistant (Ollama chat) endpoints
 # ---------------------------------------------------------------------------
 
-def _call_ollama_sync(
-    messages: list[dict[str, str]], config: dict[str, Any],
-) -> str | None:
-    """Call Ollama synchronously (for use in Flask request context)."""
-    base_url = config.get("ollama_url", "http://localhost:11434")
-    timeout = config.get("ollama_timeout_seconds", 60)
-    model = config.get("ollama_model", "qwen2.5:1.5b")
-
-    parts: list[str] = []
-    system_prompt = ""
-    for msg in messages:
-        role = msg["role"]
-        content = msg["content"]
-        if role == "system":
-            system_prompt = content
-        elif role == "user":
-            parts.append(f"User: {content}")
-        elif role == "assistant":
-            parts.append(f"Assistant: {content}")
-    parts.append("Assistant:")
-    prompt = "\n".join(parts)
-
-    payload: dict[str, Any] = {
-        "model": model,
-        "prompt": prompt,
-        "stream": False,
-    }
-    if system_prompt:
-        payload["system"] = system_prompt
-
-    try:
-        resp = httpx.post(
-            f"{base_url}/api/generate", json=payload, timeout=timeout,
-        )
-        resp.raise_for_status()
-        result = resp.json().get("response", "").strip()
-        return result or None
-    except httpx.TimeoutException:
-        logger.warning("Ollama timed out after %ds", timeout)
-        return None
-    except Exception as exc:
-        logger.error("Ollama error: %s", exc)
-        return None
-
-
 @app.route("/api/assistant/history")
 def api_assistant_history():
     """Return web assistant conversation history."""
@@ -515,18 +470,19 @@ def api_assistant_chat():
     messages: list[dict[str, str]] = [{"role": "system", "content": system_prompt}]
     messages.extend({"role": m["role"], "content": m["content"]} for m in history)
 
-    response_text = _call_ollama_sync(messages, config)
+    response_text, searched = bt_search.chat_with_search_sync(messages, config)
     if response_text is None:
         response_text = (
             "Sorry, I'm having trouble thinking right now. Try again in a moment."
         )
+        searched = False
 
     now = _time.time()
     conn = get_conn()
     bt_db.save_chat_message(conn, "web_assistant", "assistant", response_text)
     conn.close()
 
-    return jsonify({"response": response_text, "timestamp": now})
+    return jsonify({"response": response_text, "timestamp": now, "searched": searched})
 
 
 @app.route("/api/assistant/speak", methods=["POST"])

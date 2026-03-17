@@ -240,6 +240,20 @@
     }
     .chat-row:hover .chat-time { opacity: 1; }
 
+    /* Search badge */
+    .search-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.3rem;
+        font-size: 0.72rem;
+        color: var(--accent);
+        background: rgba(91, 138, 245, 0.1);
+        border: 1px solid rgba(91, 138, 245, 0.2);
+        border-radius: 4px;
+        padding: 0.15rem 0.5rem;
+        margin-bottom: 0.4rem;
+    }
+
     /* Input area */
     .chat-input-wrap {
         flex-shrink: 0;
@@ -360,7 +374,7 @@
         if (el) el.remove();
     }
 
-    function appendMessage(role, content, timestamp, scroll) {
+    function appendMessage(role, content, timestamp, scroll, options) {
         if (scroll === undefined) scroll = true;
         hideEmpty();
         const container = document.getElementById('chat-messages');
@@ -386,6 +400,14 @@
         roleLabel.className = 'chat-role';
         roleLabel.textContent = role === 'user' ? 'You' : 'Assistant';
         content_div.appendChild(roleLabel);
+
+        // Search badge
+        if (options && options.searched) {
+            const badge = document.createElement('div');
+            badge.className = 'search-badge';
+            badge.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg> Searched the web';
+            content_div.appendChild(badge);
+        }
 
         const text = document.createElement('div');
         text.className = 'chat-text';
@@ -496,7 +518,7 @@
                 body: JSON.stringify({ message: text }),
             });
             hideLoading();
-            appendMessage('assistant', data.response, data.timestamp);
+            appendMessage('assistant', data.response, data.timestamp, true, { searched: data.searched });
 
             if (document.getElementById('alexa-toggle').checked) {
                 speakOnAlexa(data.response);

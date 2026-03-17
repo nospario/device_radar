@@ -32,6 +32,7 @@ Supporting modules:
 | `bt_calendar.py` | Apple Calendar (iCloud CalDAV) integration — event fetching, caching, and prompt context for proximity/welcome messages |
 | `bt_weather.py` | Current weather via Open-Meteo API — fetches temperature and conditions, caches in memory, provides formatted string for Alexa TTS prefix |
 | `bt_news.py` | BBC News RSS headline fetching, per-device read tracking, and spoken suffix formatting for Alexa TTS |
+| `bt_search.py` | Ollama chat with web search — tool-calling agent loop using Ollama's `/api/chat` endpoint with `web_search` and `web_fetch` cloud tools; provides sync and async entry points for the web assistant and Telegram bot |
 
 ## Database
 
@@ -133,7 +134,8 @@ Presence queries use the REST API (`localhost:8080`) where possible and fall bac
   "weather_cache_minutes": 30,
   "news_enabled": true,
   "news_headline_count": 3,
-  "news_cache_minutes": 15
+  "news_cache_minutes": 15,
+  "web_search_enabled": true
 }
 ```
 
@@ -164,7 +166,7 @@ Flask app on port 8080 with dark theme.
 - `POST /api/devices/<mac>/pair` — initiate pairing
 - `POST /api/device/<id>/notifications` — toggle notifications
 - `GET /api/assistant/history` — web assistant conversation history
-- `POST /api/assistant/chat` — send message to Ollama, returns response
+- `POST /api/assistant/chat` — send message to Ollama, returns response (includes `searched` flag when web search was used)
 - `DELETE /api/assistant/history` — clear web assistant conversation
 - `POST /api/assistant/speak` — speak text on Alexa device
 
@@ -212,6 +214,22 @@ Config keys in `config.json`:
 - `news_cache_minutes` — how often to re-fetch each RSS feed (default: 15)
 
 20 BBC RSS feeds are hardcoded in `bt_news.BBC_FEEDS` (Top Stories, UK, World, Business, Politics, Technology, Science, Health, Education, Entertainment, England, Sport, Football, Cricket, F1, Rugby Union, Tennis, Golf, Nottm Forest, Leicester City). Per-device feed selection is stored in the `news_feeds` column (JSON array of feed keys), configured via grouped checkboxes on the device detail page. Headlines are stored in `news_headlines` table with guid deduplication (URL fragments stripped, guids prefixed with feed key). Cross-feed title deduplication via `GROUP BY title` in queries prevents the same story from being read twice even when it appears in multiple feeds. Per-device read tracking via `news_read` table ensures headlines aren't repeated — one device hearing a headline does not mark it as read for other devices. Marking a headline as read also marks all other rows with the same title, preventing cross-feed resurface. Headlines older than 7 days are automatically pruned. Feeds are refreshed before each alert to catch breaking news.
+
+## Web Search
+
+Ollama assistant web search via Ollama's cloud search API. Module: `bt_search.py`.
+
+Both the web assistant (`bt_web.py`) and Telegram bot (`bt_telegram.py`) use `bt_search` for all Ollama chat interactions. The module uses Ollama's `/api/chat` endpoint (via the `ollama` Python library) with tool calling support. When web search is enabled, the model can autonomously decide to call `web_search` or `web_fetch` tools, which hit Ollama's cloud API at `ollama.com`. The model inference remains local.
+
+Config keys in `config.json`:
+- `web_search_enabled` — toggle on/off (default: false)
+
+Environment variables in `/home/pi/.device-radar.env`:
+- `OLLAMA_API_KEY` — API key for Ollama cloud web search (required when `web_search_enabled` is true)
+
+The agent loop runs up to 5 tool-call iterations per query. If the `ollama` Python package is not installed, the module falls back to raw `httpx` calls to `/api/generate` (no tool calling). The web assistant UI shows a "Searched the web" badge when search was used. The Telegram bot prefixes responses with `[searched the web]` when search was invoked.
+
+`bt_alexa.py` continues to use raw `httpx` calls to `/api/generate` for greeting and encouragement generation (no web search needed for those use cases).
 
 ## Alexa Voice Selection
 
@@ -276,6 +294,7 @@ python-telegram-bot>=21.0
 python-dotenv>=1.0.0
 caldav>=1.3.0
 vobject>=0.9.6
+ollama>=0.4.0
 ```
 
 Install: `pip install -r requirements.txt --break-system-packages`
@@ -294,6 +313,7 @@ bt-monitor/
 ├── bt_calendar.py         # Apple Calendar (iCloud CalDAV) integration
 ├── bt_weather.py          # Current weather via Open-Meteo API
 ├── bt_news.py             # BBC News RSS headline integration
+├── bt_search.py           # Ollama chat with web search (tool calling agent loop)
 ├── bt_wifi.py             # WiFi/LAN scanning module + targeted ping confirmation
 ├── config.json            # User configuration (gitignored)
 ├── bt_radar.db            # SQLite database (auto-created, gitignored)
