@@ -116,7 +116,7 @@ Presence queries use the REST API (`localhost:8080`) where possible and fall bac
   "telegram_token_env": "TELEGRAM_BOT_TOKEN",
   "telegram_chat_id_env": "TELEGRAM_CHAT_ID",
   "ollama_url": "http://localhost:11434",
-  "ollama_model": "qwen3:1.7b",
+  "ollama_model": "llama3.2:3b",
   "ollama_timeout_seconds": 60,
   "conversation_history_length": 10,
   "person_aliases": {
@@ -228,7 +228,7 @@ Config keys in `config.json`:
 Environment variables in `/home/pi/.device-radar.env`:
 - `OLLAMA_API_KEY` — API key for Ollama cloud web search (required when `web_search_enabled` is true)
 
-Requires a tool-calling-capable Ollama model (e.g. `qwen3:1.7b`). Models that don't support tools (e.g. `gemma3:4b`) will gracefully fall back to chat without search. The agent loop runs up to 5 tool-call iterations per query. If the `ollama` Python package is not installed, the module falls back to raw `httpx` calls to `/api/generate` (no tool calling). The web assistant UI shows a "Searched the web" badge when search was used. The Telegram bot prefixes responses with `[searched the web]` when search was invoked.
+Requires a tool-calling-capable Ollama model (e.g. `llama3.2:3b`). Models that don't support tools (e.g. `gemma3:4b`) will gracefully fall back to chat without search. Tools are only passed to the model when the user's message contains search-related keywords (e.g. "news", "latest", "current", "war", "search") — this keeps regular chat fast (~8s) while search queries take longer (~2 min) due to multiple inference passes and the cloud search call. The agent loop runs up to 5 tool-call iterations per query. If the `ollama` Python package is not installed, the module falls back to raw `httpx` calls to `/api/generate` (no tool calling). The web assistant UI shows a "Searched the web" badge when search was used. The Telegram bot prefixes responses with `[searched the web]` when search was invoked.
 
 `bt_alexa.py` continues to use raw `httpx` calls to `/api/generate` for greeting and encouragement generation (no web search needed for those use cases).
 
