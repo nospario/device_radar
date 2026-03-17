@@ -88,6 +88,28 @@ def _is_tools_unsupported_error(exc: Exception) -> bool:
     return "does not support tools" in msg or "tools is not supported" in msg
 
 
+_SEARCH_SYSTEM_SUFFIX = (
+    " You have access to a web_search tool. You MUST call the web_search tool "
+    "whenever the user asks about current events, recent news, real-time "
+    "information, wars, politics, sports results, weather, or anything that "
+    "may have changed after your training data. Never say you cannot access "
+    "real-time information — always use web_search instead. When in doubt "
+    "about whether information is current, search the web."
+)
+
+
+def _inject_search_instructions(
+    messages: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Append web search instructions to the system message."""
+    result = []
+    for msg in messages:
+        if msg["role"] == "system":
+            msg = {**msg, "content": msg["content"] + _SEARCH_SYSTEM_SUFFIX}
+        result.append(msg)
+    return result
+
+
 def _use_thinking(config: dict[str, Any]) -> bool | None:
     """Determine whether to enable thinking mode.
 
@@ -216,6 +238,8 @@ def chat_with_search_sync(
     chat_messages: list[Any] = [
         {"role": m["role"], "content": m["content"]} for m in messages
     ]
+    if use_search:
+        chat_messages = _inject_search_instructions(chat_messages)
     searched = False
 
     try:
@@ -289,11 +313,16 @@ async def chat_with_search_async(
     chat_messages: list[Any] = [
         {"role": m["role"], "content": m["content"]} for m in messages
     ]
+    if use_search:
+        chat_messages = _inject_search_instructions(chat_messages)
     searched = False
 
     try:
         for _ in range(_MAX_TOOL_ITERATIONS):
-            kwargs: dict[str, Any] = {"model": model, "messages": chat_messages}
+            kwargs: dict[str, Any] = {
+                "model": model, "messages": chat_messages,
+                "think": _use_thinking(config),
+            }
             if tools:
                 kwargs["tools"] = tools
 
