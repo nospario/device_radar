@@ -15,7 +15,7 @@ import httpx
 logger = logging.getLogger("bt_search")
 
 _MAX_TOOL_ITERATIONS = 5
-_MAX_RESULT_CHARS = 8000
+_MAX_RESULT_CHARS = 2000
 
 
 # ---------------------------------------------------------------------------
@@ -86,6 +86,17 @@ def _is_tools_unsupported_error(exc: Exception) -> bool:
     """Check if an exception indicates the model doesn't support tools."""
     msg = str(exc).lower()
     return "does not support tools" in msg or "tools is not supported" in msg
+
+
+def _use_thinking(config: dict[str, Any]) -> bool | None:
+    """Determine whether to enable thinking mode.
+
+    Returns ``None`` to leave the default, ``False`` to explicitly disable.
+    Thinking models (e.g. qwen3) are very slow on CPU-only devices like
+    the Raspberry Pi, so thinking is disabled by default unless the config
+    explicitly enables it.
+    """
+    return config.get("ollama_think", False)
 
 
 def _execute_tool(tool_call: Any) -> str:
@@ -209,7 +220,10 @@ def chat_with_search_sync(
 
     try:
         for _ in range(_MAX_TOOL_ITERATIONS):
-            kwargs: dict[str, Any] = {"model": model, "messages": chat_messages}
+            kwargs: dict[str, Any] = {
+                "model": model, "messages": chat_messages,
+                "think": _use_thinking(config),
+            }
             if tools:
                 kwargs["tools"] = tools
 
@@ -222,7 +236,10 @@ def chat_with_search_sync(
                         model,
                     )
                     tools = []
-                    response = client.chat(model=model, messages=chat_messages)
+                    response = client.chat(
+                        model=model, messages=chat_messages,
+                        think=_use_thinking(config),
+                    )
                 else:
                     raise
 
@@ -291,6 +308,7 @@ async def chat_with_search_async(
                     tools = []
                     response = await client.chat(
                         model=model, messages=chat_messages,
+                        think=_use_thinking(config),
                     )
                 else:
                     raise
