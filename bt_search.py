@@ -90,12 +90,25 @@ def _is_tools_unsupported_error(exc: Exception) -> bool:
 
 _SEARCH_SYSTEM_SUFFIX = (
     " You have access to a web_search tool. You MUST call the web_search tool "
-    "whenever the user asks about current events, recent news, real-time "
-    "information, wars, politics, sports results, weather, or anything that "
-    "may have changed after your training data. Never say you cannot access "
-    "real-time information — always use web_search instead. When in doubt "
-    "about whether information is current, search the web."
+    "to answer this question. Do not rely on your training data. Search the "
+    "web first, then answer based on the search results."
 )
+
+_SEARCH_KEYWORDS = [
+    "search", "look up", "google", "find out", "latest", "current",
+    "recent", "today", "right now", "breaking", "news", "update",
+    "what's happening", "what is happening", "who won", "score",
+    "weather in", "price of", "stock", "election", "war",
+]
+
+
+def _needs_search(messages: list[dict[str, Any]]) -> bool:
+    """Heuristic: check if the latest user message likely needs web search."""
+    for msg in reversed(messages):
+        if msg["role"] == "user":
+            text = msg["content"].lower()
+            return any(kw in text for kw in _SEARCH_KEYWORDS)
+    return False
 
 
 def _inject_search_instructions(
@@ -110,14 +123,16 @@ def _inject_search_instructions(
     return result
 
 
-def _use_thinking(config: dict[str, Any]) -> bool | None:
+def _use_thinking(config: dict[str, Any], tools_active: bool = False) -> bool | None:
     """Determine whether to enable thinking mode.
 
-    Returns ``None`` to leave the default, ``False`` to explicitly disable.
-    Thinking models (e.g. qwen3) are very slow on CPU-only devices like
-    the Raspberry Pi, so thinking is disabled by default unless the config
-    explicitly enables it.
+    When *tools_active* is ``True``, thinking is always enabled because
+    ``qwen3`` models require thinking to reliably trigger tool calls.
+    For regular (no-tool) chat, thinking is disabled by default because
+    it is very slow on CPU-only devices like the Raspberry Pi.
     """
+    if tools_active:
+        return None  # let the model decide (thinking enabled)
     return config.get("ollama_think", False)
 
 
@@ -233,12 +248,15 @@ def chat_with_search_sync(
     use_search = _search_enabled(config)
 
     client = _ollama.Client(host=host, timeout=timeout)
-    tools = [_web_search_fn, _web_fetch_fn] if use_search else []
 
     chat_messages: list[Any] = [
         {"role": m["role"], "content": m["content"]} for m in messages
     ]
-    if use_search:
+    # Only activate tools when the query likely needs search — passing tools
+    # to every request dramatically slows down inference on CPU-only devices.
+    tools_active = use_search and _needs_search(chat_messages)
+    tools = [_web_search_fn, _web_fetch_fn] if tools_active else []
+    if tools_active:
         chat_messages = _inject_search_instructions(chat_messages)
     searched = False
 
@@ -246,7 +264,7 @@ def chat_with_search_sync(
         for _ in range(_MAX_TOOL_ITERATIONS):
             kwargs: dict[str, Any] = {
                 "model": model, "messages": chat_messages,
-                "think": _use_thinking(config),
+                "think": _use_thinking(config, tools_active=bool(tools)),
             }
             if tools:
                 kwargs["tools"] = tools
@@ -262,7 +280,7 @@ def chat_with_search_sync(
                     tools = []
                     response = client.chat(
                         model=model, messages=chat_messages,
-                        think=_use_thinking(config),
+                        think=_use_thinking(config, tools_active=False),
                     )
                 else:
                     raise
@@ -308,12 +326,13 @@ async def chat_with_search_async(
     use_search = _search_enabled(config)
 
     client = _ollama.AsyncClient(host=host, timeout=timeout)
-    tools = [_web_search_fn, _web_fetch_fn] if use_search else []
 
     chat_messages: list[Any] = [
         {"role": m["role"], "content": m["content"]} for m in messages
     ]
-    if use_search:
+    tools_active = use_search and _needs_search(chat_messages)
+    tools = [_web_search_fn, _web_fetch_fn] if tools_active else []
+    if tools_active:
         chat_messages = _inject_search_instructions(chat_messages)
     searched = False
 
@@ -321,7 +340,7 @@ async def chat_with_search_async(
         for _ in range(_MAX_TOOL_ITERATIONS):
             kwargs: dict[str, Any] = {
                 "model": model, "messages": chat_messages,
-                "think": _use_thinking(config),
+                "think": _use_thinking(config, tools_active=bool(tools)),
             }
             if tools:
                 kwargs["tools"] = tools
@@ -337,7 +356,7 @@ async def chat_with_search_async(
                     tools = []
                     response = await client.chat(
                         model=model, messages=chat_messages,
-                        think=_use_thinking(config),
+                        think=_use_thinking(config, tools_active=False),
                     )
                 else:
                     raise
