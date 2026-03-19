@@ -528,6 +528,12 @@ def main() -> None:
     # Ensure DB exists
     bt_db.init_db(get_db_path())
 
+    # Register Kitkat blueprint if enabled
+    if config.get("kitkat_enabled"):
+        from bt_kitkat_web import kitkat_bp
+        app.register_blueprint(kitkat_bp)
+        logger.info("Kitkat blueprint registered")
+
     logger.info("Starting Bluetooth Radar dashboard on port %d", port)
     app.run(host="0.0.0.0", port=port, debug=False)
 

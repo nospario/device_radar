@@ -158,6 +158,20 @@ def init_db(db_path: str | Path = DEFAULT_DB_PATH) -> None:
             ON news_read(mac_address, headline_id);
     """)
 
+    # Kitkat personal memory agent
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS kitkat_memories (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            fact TEXT NOT NULL,
+            source TEXT NOT NULL DEFAULT 'conversation',
+            chat_source TEXT NOT NULL DEFAULT 'web',
+            chroma_id TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            superseded_by INTEGER REFERENCES kitkat_memories(id),
+            is_active INTEGER NOT NULL DEFAULT 1
+        );
+    """)
+
     # One-time data migrations (tracked so they never re-run)
     conn.execute("CREATE TABLE IF NOT EXISTS migrations (name TEXT PRIMARY KEY)")
     _run_migration(conn, "watchlisted_notify_backfill",
@@ -789,3 +803,45 @@ def delete_echo_device(conn: sqlite3.Connection, device_name: str) -> bool:
     )
     conn.commit()
     return cur.rowcount > 0
+
+
+# ---------------------------------------------------------------------------
+# Kitkat memories
+# ---------------------------------------------------------------------------
+
+def save_kitkat_memory(
+    conn: sqlite3.Connection,
+    fact: str,
+    source: str,
+    chat_source: str,
+    chroma_id: str | None = None,
+) -> int:
+    """Insert a memory row and return its id."""
+    cur = conn.execute(
+        "INSERT INTO kitkat_memories (fact, source, chat_source, chroma_id) "
+        "VALUES (?, ?, ?, ?)",
+        (fact, source, chat_source, chroma_id),
+    )
+    conn.commit()
+    return cur.lastrowid
+
+
+def get_kitkat_memories(
+    conn: sqlite3.Connection, limit: int = 50, active_only: bool = True,
+) -> list[dict[str, Any]]:
+    """Fetch memories ordered by created_at DESC."""
+    where = "WHERE is_active = 1" if active_only else ""
+    rows = conn.execute(
+        f"SELECT id, fact, source, chat_source, chroma_id, created_at, is_active "
+        f"FROM kitkat_memories {where} ORDER BY created_at DESC LIMIT ?",
+        (limit,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def deactivate_kitkat_memory(conn: sqlite3.Connection, memory_id: int) -> None:
+    """Set is_active = 0."""
+    conn.execute(
+        "UPDATE kitkat_memories SET is_active = 0 WHERE id = ?", (memory_id,),
+    )
+    conn.commit()

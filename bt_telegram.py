@@ -18,6 +18,12 @@ import httpx
 import bt_db
 import bt_search
 
+try:
+    import bt_kitkat_telegram
+    _HAS_KITKAT = True
+except ImportError:
+    _HAS_KITKAT = False
+
 logger = logging.getLogger("bt_telegram")
 
 CONFIG_PATH = Path(__file__).resolve().parent / "config.json"
@@ -889,6 +895,24 @@ async def _cmd_readaloud(update, context) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Telegram bot handlers — Kitkat
+# ---------------------------------------------------------------------------
+
+async def _cmd_kitkat(update, context) -> None:
+    """Handle /kitkat commands."""
+    if not _is_authorized(update.effective_chat.id):
+        return
+    config = load_config()
+    if not _HAS_KITKAT or not config.get("kitkat_enabled"):
+        await update.message.reply_text("Kitkat is not enabled.")
+        return
+    chat_id = update.effective_chat.id
+    args = context.args or []
+    response = await bt_kitkat_telegram.handle_command(chat_id, args, config)
+    await update.message.reply_text(response)
+
+
+# ---------------------------------------------------------------------------
 # Telegram bot handlers — message router
 # ---------------------------------------------------------------------------
 
@@ -909,6 +933,19 @@ async def _handle_message(update, context) -> None:
         await update.message.reply_text(
             await answer_presence(text, config, db_path),
         )
+        return
+
+    # Kitkat mode — route to personal memory agent
+    if (
+        _HAS_KITKAT
+        and config.get("kitkat_enabled")
+        and bt_kitkat_telegram.is_kitkat_mode(update.effective_chat.id)
+    ):
+        await update.effective_chat.send_action(ChatAction.TYPING)
+        response = await bt_kitkat_telegram.handle_message(
+            update.effective_chat.id, text, config,
+        )
+        await update.message.reply_text(response)
         return
 
     # General chat — forward to Ollama
@@ -1013,6 +1050,9 @@ def main() -> None:
     app.add_handler(CommandHandler("say", _cmd_say))
     app.add_handler(CommandHandler("echoes", _cmd_echoes))
     app.add_handler(CommandHandler("readaloud", _cmd_readaloud))
+    if _HAS_KITKAT and config.get("kitkat_enabled"):
+        app.add_handler(CommandHandler("kitkat", _cmd_kitkat))
+        logger.info("Kitkat Telegram integration enabled")
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, _handle_message))
 
     # Register bot commands with Telegram so they appear in the / menu
@@ -1033,6 +1073,7 @@ def main() -> None:
             BotCommand("say", "Speak a message on an Echo device"),
             BotCommand("echoes", "List available Echo devices"),
             BotCommand("readaloud", "Toggle Alexa read-aloud for chat"),
+            BotCommand("kitkat", "Personal memory agent (on/off/memories/stats)"),
         ])
 
     app.post_init = _post_init

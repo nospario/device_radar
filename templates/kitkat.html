@@ -1,0 +1,803 @@
+{% extends "base.html" %}
+{% block title %}Kitkat - Device Radar{% endblock %}
+
+{% block content %}
+<div class="kitkat-page">
+    <div class="kitkat-toolbar">
+        <div class="toolbar-left">
+            <span class="kitkat-title">Kitkat</span>
+            <span class="kitkat-subtitle">Personal Memory Agent</span>
+        </div>
+        <div class="toolbar-right">
+            <button class="toolbar-btn" onclick="openMemories()" title="View memories">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 3h6a4 4 0 014 4v14a3 3 0 00-3-3H2z"/><path d="M22 3h-6a4 4 0 00-4 4v14a3 3 0 013-3h7z"/></svg>
+                Memories
+            </button>
+            <button class="toolbar-btn" onclick="openStats()" title="View stats">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 20V10"/><path d="M12 20V4"/><path d="M6 20v-6"/></svg>
+                Stats
+            </button>
+            <button class="toolbar-btn" onclick="clearHistory()" title="Clear conversation">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>
+                Clear
+            </button>
+        </div>
+    </div>
+
+    {% if not storage_ok %}
+    <div class="kitkat-warning">External storage unavailable — Kitkat running in limited mode</div>
+    {% endif %}
+
+    <div id="chat-messages" class="chat-messages">
+        <div class="chat-empty" id="chat-empty">
+            <div class="empty-icon">
+                <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2 3h6a4 4 0 014 4v14a3 3 0 00-3-3H2z"/><path d="M22 3h-6a4 4 0 00-4 4v14a3 3 0 013-3h7z"/></svg>
+            </div>
+            <p>Chat with Kitkat</p>
+            <span>Personal memory agent powered by Ollama + ChromaDB</span>
+        </div>
+    </div>
+
+    <div class="chat-input-wrap">
+        <form id="chat-form" class="chat-input-bar">
+            <input type="text" id="chat-input" placeholder="Message Kitkat..." autocomplete="off">
+            <button type="submit" class="send-btn" id="chat-send" title="Send message">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
+            </button>
+        </form>
+    </div>
+</div>
+
+<!-- Memories modal -->
+<div id="memories-modal" class="kitkat-modal" style="display:none;">
+    <div class="kitkat-modal-content">
+        <div class="modal-header">
+            <h3>Memories</h3>
+            <button class="modal-close" onclick="closeModals()">&times;</button>
+        </div>
+        <div class="modal-body">
+            <div class="memory-add-row">
+                <input type="text" id="memory-input" placeholder="Add a memory..." autocomplete="off">
+                <button onclick="addMemory()" class="memory-add-btn">Add</button>
+            </div>
+            <div id="memories-list" class="memories-list">
+                <p class="text-dim">Loading...</p>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Stats modal -->
+<div id="stats-modal" class="kitkat-modal" style="display:none;">
+    <div class="kitkat-modal-content">
+        <div class="modal-header">
+            <h3>Index Stats</h3>
+            <button class="modal-close" onclick="closeModals()">&times;</button>
+        </div>
+        <div class="modal-body">
+            <div id="stats-content">
+                <p class="text-dim">Loading...</p>
+            </div>
+            <div class="modal-actions">
+                <button class="toolbar-btn" onclick="triggerReindex()">Reindex Now</button>
+                <button class="toolbar-btn btn-danger" onclick="resetAll()">Reset All Memories</button>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<style>
+    .container:has(.kitkat-page) {
+        padding: 0;
+        max-width: 100%;
+    }
+    .kitkat-page {
+        display: flex;
+        flex-direction: column;
+        height: calc(100vh - 53px);
+        max-width: 900px;
+        margin: 0 auto;
+        padding: 0;
+    }
+
+    /* Toolbar */
+    .kitkat-toolbar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 0.6rem 1rem;
+        background: var(--bg-card);
+        border-bottom: 1px solid var(--border);
+        flex-shrink: 0;
+    }
+    .toolbar-left {
+        display: flex;
+        align-items: baseline;
+        gap: 0.6rem;
+    }
+    .kitkat-title {
+        font-size: 1rem;
+        font-weight: 600;
+        color: var(--text);
+    }
+    .kitkat-subtitle {
+        font-size: 0.75rem;
+        color: var(--text-dim);
+    }
+    .toolbar-right {
+        display: flex;
+        align-items: center;
+        gap: 0.4rem;
+    }
+    .toolbar-btn {
+        display: flex;
+        align-items: center;
+        gap: 0.35rem;
+        padding: 0.35rem 0.7rem;
+        font-size: 0.78rem;
+        color: var(--text-dim);
+        background: transparent;
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        cursor: pointer;
+        transition: all 0.15s;
+    }
+    .toolbar-btn:hover { color: var(--text); border-color: var(--text-dim); }
+    .btn-danger:hover { color: var(--red); border-color: var(--red); }
+
+    /* Warning bar */
+    .kitkat-warning {
+        background: rgba(255, 149, 0, 0.15);
+        color: #ff9500;
+        font-size: 0.8rem;
+        padding: 0.5rem 1rem;
+        text-align: center;
+        border-bottom: 1px solid rgba(255, 149, 0, 0.2);
+        flex-shrink: 0;
+    }
+
+    /* Chat area */
+    .chat-messages {
+        flex: 1;
+        overflow-y: auto;
+        padding: 1.5rem 0;
+        scroll-behavior: smooth;
+    }
+    .chat-messages::-webkit-scrollbar { width: 6px; }
+    .chat-messages::-webkit-scrollbar-track { background: transparent; }
+    .chat-messages::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+    .chat-empty {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        height: 100%;
+        color: var(--text-dim);
+        gap: 0.5rem;
+    }
+    .empty-icon { opacity: 0.3; }
+    .chat-empty p { font-size: 1.1rem; color: var(--text); margin: 0; }
+    .chat-empty span { font-size: 0.8rem; }
+
+    /* Message rows */
+    .chat-row {
+        padding: 1.25rem 1.5rem;
+        display: flex;
+        gap: 1rem;
+        align-items: flex-start;
+    }
+    .chat-row.assistant {
+        background: var(--bg-card);
+        border-top: 1px solid var(--border);
+        border-bottom: 1px solid var(--border);
+    }
+    .chat-row.user { background: transparent; }
+
+    .chat-avatar {
+        width: 30px;
+        height: 30px;
+        border-radius: 6px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        flex-shrink: 0;
+        font-size: 0.8rem;
+    }
+    .chat-row.user .chat-avatar {
+        background: rgba(91, 138, 245, 0.2);
+        color: var(--accent);
+    }
+    .chat-row.assistant .chat-avatar {
+        background: rgba(175, 82, 222, 0.2);
+        color: #af52de;
+    }
+
+    .chat-content { flex: 1; min-width: 0; }
+    .chat-role {
+        font-size: 0.75rem;
+        font-weight: 600;
+        margin-bottom: 0.3rem;
+        text-transform: uppercase;
+        letter-spacing: 0.03em;
+    }
+    .chat-row.user .chat-role { color: var(--accent); }
+    .chat-row.assistant .chat-role { color: #af52de; }
+    .chat-text {
+        font-size: 0.92rem;
+        line-height: 1.65;
+        color: var(--text);
+        white-space: pre-wrap;
+        word-wrap: break-word;
+    }
+    .chat-time {
+        font-size: 0.68rem;
+        color: var(--text-dim);
+        margin-top: 0.4rem;
+        opacity: 0;
+        transition: opacity 0.15s;
+    }
+    .chat-row:hover .chat-time { opacity: 1; }
+
+    /* Context and search badges */
+    .context-badges {
+        display: flex;
+        gap: 0.4rem;
+        margin-bottom: 0.4rem;
+        flex-wrap: wrap;
+    }
+    .context-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.25rem;
+        font-size: 0.7rem;
+        border-radius: 4px;
+        padding: 0.12rem 0.45rem;
+    }
+    .badge-memories { color: #af52de; background: rgba(175, 82, 222, 0.1); border: 1px solid rgba(175, 82, 222, 0.2); }
+    .badge-obsidian { color: #30d158; background: rgba(48, 209, 88, 0.1); border: 1px solid rgba(48, 209, 88, 0.2); }
+    .badge-gdrive { color: #ff9500; background: rgba(255, 149, 0, 0.1); border: 1px solid rgba(255, 149, 0, 0.2); }
+    .badge-calendar { color: #5ac8fa; background: rgba(90, 200, 250, 0.1); border: 1px solid rgba(90, 200, 250, 0.2); }
+    .badge-search { color: var(--accent); background: rgba(91, 138, 245, 0.1); border: 1px solid rgba(91, 138, 245, 0.2); }
+
+    /* Input area */
+    .chat-input-wrap {
+        flex-shrink: 0;
+        padding: 1rem 1.5rem 1.25rem;
+        background: var(--bg);
+        border-top: 1px solid var(--border);
+    }
+    .chat-input-bar {
+        display: flex;
+        align-items: center;
+        gap: 0;
+        background: var(--bg-card);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 0.25rem 0.25rem 0.25rem 1rem;
+        transition: border-color 0.15s;
+    }
+    .chat-input-bar:focus-within { border-color: #af52de; }
+    .chat-input-bar input {
+        flex: 1;
+        background: transparent;
+        border: none;
+        outline: none;
+        color: var(--text);
+        font-size: 0.92rem;
+        padding: 0.5rem 0;
+    }
+    .chat-input-bar input::placeholder { color: var(--text-dim); }
+    .send-btn {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 36px;
+        height: 36px;
+        border-radius: 8px;
+        border: none;
+        background: #af52de;
+        color: #fff;
+        cursor: pointer;
+        flex-shrink: 0;
+        transition: opacity 0.15s;
+    }
+    .send-btn:hover { opacity: 0.85; }
+    .send-btn:disabled { opacity: 0.4; cursor: default; }
+
+    /* Loading dots */
+    .dot-pulse {
+        display: inline-flex;
+        gap: 0.35rem;
+        padding: 0.2rem 0;
+    }
+    .dot-pulse span {
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: var(--text-dim);
+        animation: dotPulse 1.2s ease-in-out infinite;
+    }
+    .dot-pulse span:nth-child(2) { animation-delay: 0.2s; }
+    .dot-pulse span:nth-child(3) { animation-delay: 0.4s; }
+    @keyframes dotPulse {
+        0%, 80%, 100% { opacity: 0.3; transform: scale(0.8); }
+        40% { opacity: 1; transform: scale(1); }
+    }
+
+    /* Modal */
+    .kitkat-modal {
+        position: fixed;
+        inset: 0;
+        z-index: 1000;
+        background: rgba(0, 0, 0, 0.6);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+    }
+    .kitkat-modal-content {
+        background: var(--bg-card);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        width: 90%;
+        max-width: 500px;
+        max-height: 80vh;
+        display: flex;
+        flex-direction: column;
+    }
+    .modal-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 1rem 1.25rem;
+        border-bottom: 1px solid var(--border);
+    }
+    .modal-header h3 { margin: 0; font-size: 1rem; color: var(--text); }
+    .modal-close {
+        background: none;
+        border: none;
+        color: var(--text-dim);
+        font-size: 1.4rem;
+        cursor: pointer;
+        padding: 0 0.25rem;
+        line-height: 1;
+    }
+    .modal-close:hover { color: var(--text); }
+    .modal-body {
+        padding: 1rem 1.25rem;
+        overflow-y: auto;
+        flex: 1;
+    }
+    .modal-actions {
+        display: flex;
+        gap: 0.5rem;
+        margin-top: 1rem;
+        padding-top: 1rem;
+        border-top: 1px solid var(--border);
+    }
+
+    /* Memory list */
+    .memory-add-row {
+        display: flex;
+        gap: 0.5rem;
+        margin-bottom: 1rem;
+    }
+    .memory-add-row input {
+        flex: 1;
+        padding: 0.4rem 0.7rem;
+        background: var(--bg);
+        color: var(--text);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        font-size: 0.85rem;
+        outline: none;
+    }
+    .memory-add-row input:focus { border-color: #af52de; }
+    .memory-add-btn {
+        padding: 0.4rem 0.8rem;
+        background: #af52de;
+        color: #fff;
+        border: none;
+        border-radius: 6px;
+        font-size: 0.85rem;
+        cursor: pointer;
+    }
+    .memory-add-btn:hover { opacity: 0.85; }
+    .memories-list { max-height: 50vh; overflow-y: auto; }
+    .memory-item {
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-start;
+        gap: 0.5rem;
+        padding: 0.5rem 0;
+        border-bottom: 1px solid var(--border);
+        font-size: 0.85rem;
+    }
+    .memory-item:last-child { border-bottom: none; }
+    .memory-fact { flex: 1; color: var(--text); line-height: 1.4; }
+    .memory-meta {
+        font-size: 0.7rem;
+        color: var(--text-dim);
+        margin-top: 0.2rem;
+    }
+    .memory-delete {
+        background: none;
+        border: none;
+        color: var(--text-dim);
+        cursor: pointer;
+        font-size: 1rem;
+        padding: 0 0.3rem;
+        flex-shrink: 0;
+    }
+    .memory-delete:hover { color: var(--red); }
+
+    /* Stats */
+    .stats-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 0.75rem;
+    }
+    .stat-card {
+        padding: 0.75rem;
+        background: var(--bg);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+    }
+    .stat-label { font-size: 0.75rem; color: var(--text-dim); margin-bottom: 0.25rem; }
+    .stat-value { font-size: 1.25rem; font-weight: 600; color: var(--text); }
+    .stat-status {
+        margin-top: 0.75rem;
+        padding: 0.5rem 0.75rem;
+        border-radius: 8px;
+        font-size: 0.8rem;
+    }
+    .stat-status.ok { background: rgba(48, 209, 88, 0.1); color: #30d158; }
+    .stat-status.warn { background: rgba(255, 149, 0, 0.15); color: #ff9500; }
+
+    .text-dim { color: var(--text-dim); font-size: 0.85rem; }
+
+    @media (max-width: 768px) {
+        .kitkat-page { height: calc(100vh - 55px); }
+        .kitkat-toolbar { flex-wrap: wrap; gap: 0.5rem; }
+        .toolbar-right { flex-wrap: wrap; }
+        .chat-row { padding: 1rem; gap: 0.75rem; }
+        .chat-input-wrap { padding: 0.75rem; }
+        .kitkat-modal-content { width: 95%; }
+    }
+</style>
+<script>
+(function() {
+    function scrollToBottom() {
+        var c = document.getElementById('chat-messages');
+        c.scrollTop = c.scrollHeight;
+    }
+
+    function hideEmpty() {
+        var el = document.getElementById('chat-empty');
+        if (el) el.remove();
+    }
+
+    function appendMessage(role, content, timestamp, scroll, options) {
+        if (scroll === undefined) scroll = true;
+        hideEmpty();
+        var container = document.getElementById('chat-messages');
+
+        var row = document.createElement('div');
+        row.className = 'chat-row ' + role;
+
+        // Avatar
+        var avatar = document.createElement('div');
+        avatar.className = 'chat-avatar';
+        if (role === 'user') {
+            avatar.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>';
+        } else {
+            avatar.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 3h6a4 4 0 014 4v14a3 3 0 00-3-3H2z"/><path d="M22 3h-6a4 4 0 00-4 4v14a3 3 0 013-3h7z"/></svg>';
+        }
+        row.appendChild(avatar);
+
+        // Content
+        var contentDiv = document.createElement('div');
+        contentDiv.className = 'chat-content';
+
+        var roleLabel = document.createElement('div');
+        roleLabel.className = 'chat-role';
+        roleLabel.textContent = role === 'user' ? 'You' : 'Kitkat';
+        contentDiv.appendChild(roleLabel);
+
+        // Context and search badges
+        if (options && role === 'assistant') {
+            var badges = document.createElement('div');
+            badges.className = 'context-badges';
+            var hasBadges = false;
+
+            if (options.searched) {
+                var b = document.createElement('span');
+                b.className = 'context-badge badge-search';
+                b.textContent = 'Searched the web';
+                badges.appendChild(b);
+                hasBadges = true;
+            }
+            if (options.context_used) {
+                var ctx = options.context_used;
+                if (ctx.memories > 0) {
+                    var b = document.createElement('span');
+                    b.className = 'context-badge badge-memories';
+                    b.textContent = ctx.memories + ' memories';
+                    badges.appendChild(b);
+                    hasBadges = true;
+                }
+                if (ctx.obsidian > 0) {
+                    var b = document.createElement('span');
+                    b.className = 'context-badge badge-obsidian';
+                    b.textContent = ctx.obsidian + ' notes';
+                    badges.appendChild(b);
+                    hasBadges = true;
+                }
+                if (ctx.gdrive > 0) {
+                    var b = document.createElement('span');
+                    b.className = 'context-badge badge-gdrive';
+                    b.textContent = ctx.gdrive + ' files';
+                    badges.appendChild(b);
+                    hasBadges = true;
+                }
+                if (ctx.calendar > 0) {
+                    var b = document.createElement('span');
+                    b.className = 'context-badge badge-calendar';
+                    b.textContent = ctx.calendar + ' events';
+                    badges.appendChild(b);
+                    hasBadges = true;
+                }
+            }
+            if (hasBadges) contentDiv.appendChild(badges);
+        }
+
+        var text = document.createElement('div');
+        text.className = 'chat-text';
+        text.textContent = content;
+        contentDiv.appendChild(text);
+
+        if (timestamp) {
+            var timeEl = document.createElement('div');
+            timeEl.className = 'chat-time';
+            timeEl.textContent = new Date(timestamp * 1000).toLocaleTimeString();
+            contentDiv.appendChild(timeEl);
+        }
+
+        row.appendChild(contentDiv);
+        container.appendChild(row);
+        if (scroll) scrollToBottom();
+    }
+
+    function showLoading() {
+        hideEmpty();
+        var container = document.getElementById('chat-messages');
+        var row = document.createElement('div');
+        row.className = 'chat-row assistant';
+        row.id = 'loading-indicator';
+
+        var avatar = document.createElement('div');
+        avatar.className = 'chat-avatar';
+        avatar.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 3h6a4 4 0 014 4v14a3 3 0 00-3-3H2z"/><path d="M22 3h-6a4 4 0 00-4 4v14a3 3 0 013-3h7z"/></svg>';
+        row.appendChild(avatar);
+
+        var content = document.createElement('div');
+        content.className = 'chat-content';
+        content.innerHTML = '<div class="chat-role">Kitkat</div><div class="dot-pulse"><span></span><span></span><span></span></div>';
+        row.appendChild(content);
+
+        container.appendChild(row);
+        scrollToBottom();
+    }
+
+    function hideLoading() {
+        var el = document.getElementById('loading-indicator');
+        if (el) el.remove();
+    }
+
+    // API helper
+    async function api(url, opts) {
+        var resp = await fetch(url, opts);
+        return await resp.json();
+    }
+
+    // Load chat history
+    async function loadHistory() {
+        try {
+            var data = await api('/api/kitkat/history');
+            if (data.messages && data.messages.length > 0) {
+                document.getElementById('chat-messages').innerHTML = '';
+                for (var msg of data.messages) {
+                    appendMessage(msg.role, msg.content, msg.timestamp, false);
+                }
+                scrollToBottom();
+            }
+        } catch (err) {
+            console.error('Failed to load history:', err);
+        }
+    }
+
+    // Chat form submit
+    document.getElementById('chat-form').addEventListener('submit', async function(e) {
+        e.preventDefault();
+        var input = document.getElementById('chat-input');
+        var text = input.value.trim();
+        if (!text) return;
+
+        input.value = '';
+        appendMessage('user', text, Date.now() / 1000);
+        showLoading();
+
+        var sendBtn = document.getElementById('chat-send');
+        sendBtn.disabled = true;
+
+        try {
+            var data = await api('/api/kitkat/chat', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ message: text }),
+            });
+            hideLoading();
+            appendMessage('assistant', data.response, Date.now() / 1000, true, {
+                searched: data.searched,
+                context_used: data.context_used,
+            });
+        } catch (err) {
+            hideLoading();
+            appendMessage('assistant',
+                'Sorry, something went wrong. Please try again.',
+                Date.now() / 1000);
+        } finally {
+            sendBtn.disabled = false;
+            input.focus();
+        }
+    });
+
+    // Clear history
+    window.clearHistory = async function() {
+        if (!confirm('Clear all conversation history?')) return;
+        try {
+            await api('/api/kitkat/history', { method: 'DELETE' });
+            document.getElementById('chat-messages').innerHTML =
+                '<div class="chat-empty" id="chat-empty">' +
+                '<div class="empty-icon"><svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2 3h6a4 4 0 014 4v14a3 3 0 00-3-3H2z"/><path d="M22 3h-6a4 4 0 00-4 4v14a3 3 0 013-3h7z"/></svg></div>' +
+                '<p>Chat with Kitkat</p>' +
+                '<span>Personal memory agent powered by Ollama + ChromaDB</span></div>';
+        } catch (err) {
+            console.error('Failed to clear history:', err);
+        }
+    };
+
+    // Close all modals
+    window.closeModals = function() {
+        document.getElementById('memories-modal').style.display = 'none';
+        document.getElementById('stats-modal').style.display = 'none';
+    };
+
+    // Click outside modal to close
+    document.querySelectorAll('.kitkat-modal').forEach(function(modal) {
+        modal.addEventListener('click', function(e) {
+            if (e.target === modal) closeModals();
+        });
+    });
+
+    // Memories modal
+    window.openMemories = async function() {
+        document.getElementById('memories-modal').style.display = 'flex';
+        var list = document.getElementById('memories-list');
+        list.innerHTML = '<p class="text-dim">Loading...</p>';
+        try {
+            var data = await api('/api/kitkat/memories');
+            if (!data.memories || data.memories.length === 0) {
+                list.innerHTML = '<p class="text-dim">No memories yet. Chat with Kitkat or add one manually.</p>';
+                return;
+            }
+            list.innerHTML = '';
+            for (var m of data.memories) {
+                var item = document.createElement('div');
+                item.className = 'memory-item';
+                item.innerHTML =
+                    '<div><div class="memory-fact">' + escapeHtml(m.fact) + '</div>' +
+                    '<div class="memory-meta">' + escapeHtml(m.source) + ' · ' + escapeHtml(m.created_at) + '</div></div>' +
+                    '<button class="memory-delete" data-id="' + m.id + '" title="Delete memory">&times;</button>';
+                list.appendChild(item);
+            }
+            // Attach delete handlers
+            list.querySelectorAll('.memory-delete').forEach(function(btn) {
+                btn.addEventListener('click', async function() {
+                    var id = this.getAttribute('data-id');
+                    await api('/api/kitkat/memories/' + id, { method: 'DELETE' });
+                    openMemories(); // Refresh
+                });
+            });
+        } catch (err) {
+            list.innerHTML = '<p class="text-dim">Failed to load memories.</p>';
+        }
+    };
+
+    // Add memory
+    window.addMemory = async function() {
+        var input = document.getElementById('memory-input');
+        var fact = input.value.trim();
+        if (!fact) return;
+        input.value = '';
+        try {
+            await api('/api/kitkat/memories', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ fact: fact }),
+            });
+            openMemories(); // Refresh
+        } catch (err) {
+            console.error('Failed to add memory:', err);
+        }
+    };
+
+    // Stats modal
+    window.openStats = async function() {
+        document.getElementById('stats-modal').style.display = 'flex';
+        var content = document.getElementById('stats-content');
+        content.innerHTML = '<p class="text-dim">Loading...</p>';
+        try {
+            var data = await api('/api/kitkat/stats');
+            var s = data.stats;
+            var html = '<div class="stats-grid">' +
+                '<div class="stat-card"><div class="stat-label">Memories</div><div class="stat-value">' + s.conversations + '</div></div>' +
+                '<div class="stat-card"><div class="stat-label">Obsidian Notes</div><div class="stat-value">' + s.obsidian + '</div></div>' +
+                '<div class="stat-card"><div class="stat-label">Google Drive</div><div class="stat-value">' + s.gdrive + '</div></div>' +
+                '<div class="stat-card"><div class="stat-label">Calendar</div><div class="stat-value">' + s.calendar + '</div></div>' +
+                '</div>';
+            html += '<div class="stat-status ' + (data.storage_available ? 'ok' : 'warn') + '">' +
+                'Storage: ' + (data.storage_available ? 'Available' : 'Unavailable') + '</div>';
+            content.innerHTML = html;
+        } catch (err) {
+            content.innerHTML = '<p class="text-dim">Failed to load stats.</p>';
+        }
+    };
+
+    // Reindex
+    window.triggerReindex = async function() {
+        try {
+            await api('/api/kitkat/reindex', { method: 'POST' });
+            var content = document.getElementById('stats-content');
+            content.innerHTML += '<p class="text-dim" style="margin-top:0.5rem;">Reindexing started...</p>';
+        } catch (err) {
+            console.error('Reindex failed:', err);
+        }
+    };
+
+    // Reset all
+    window.resetAll = async function() {
+        if (!confirm('This will delete ALL memories and conversation history. Are you sure?')) return;
+        if (!confirm('This cannot be undone. Really reset everything?')) return;
+        try {
+            await api('/api/kitkat/reset', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ confirm: true }),
+            });
+            closeModals();
+            window.clearHistory();
+        } catch (err) {
+            console.error('Reset failed:', err);
+        }
+    };
+
+    function escapeHtml(text) {
+        var div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
+    }
+
+    // Memory input enter key
+    document.getElementById('memory-input').addEventListener('keydown', function(e) {
+        if (e.key === 'Enter') { e.preventDefault(); addMemory(); }
+    });
+
+    // Init
+    loadHistory();
+    document.getElementById('chat-input').focus();
+})();
+</script>
+{% endblock %}

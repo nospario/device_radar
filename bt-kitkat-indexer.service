@@ -1,0 +1,17 @@
+[Unit]
+Description=Kitkat Knowledge Indexer
+After=network.target
+Wants=bt-scanner.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/bt-monitor/bt_kitkat_index.py --service
+WorkingDirectory=/opt/bt-monitor
+EnvironmentFile=/home/pi/.device-radar.env
+Restart=always
+RestartSec=30
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
