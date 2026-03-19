@@ -14,12 +14,11 @@ A multi-module Python application for Raspberry Pi 5 that scans for nearby devic
 
 ## Architecture
 
-Four services plus supporting modules:
+Three services plus supporting modules:
 
 - **bt_scanner.py** — async background scanner: BLE, Classic Bluetooth, WiFi/LAN discovery, device classification, state tracking, and Telegram notifications
 - **bt_web.py** — Flask web dashboard on port 8080 with REST API
 - **bt_telegram.py** — Telegram bot with presence queries, Ollama chat integration, and proactive arrival/departure notifications
-- **bt_kitkat_index.py** — Kitkat background indexer: periodically indexes Obsidian vault, Google Drive, and calendar events into ChromaDB
 
 Supporting modules:
 
@@ -34,9 +33,8 @@ Supporting modules:
 | `bt_weather.py` | Current weather via Open-Meteo API — fetches temperature and conditions, caches in memory, provides formatted string for Alexa TTS prefix |
 | `bt_news.py` | BBC News RSS headline fetching, per-device read tracking, and spoken suffix formatting for Alexa TTS |
 | `bt_search.py` | Ollama chat with web search — tool-calling agent loop using Ollama's `/api/chat` endpoint with `web_search` and `web_fetch` cloud tools; provides sync and async entry points for the web assistant and Telegram bot |
-| `bt_kitkat.py` | Kitkat personal memory RAG engine — ChromaDB vector storage, context retrieval, chat orchestration via bt_search, background memory extraction |
-| `bt_kitkat_web.py` | Kitkat Flask blueprint — web chat UI and API endpoints (registered into bt_web.py) |
-| `bt_kitkat_telegram.py` | Kitkat Telegram integration — kitkat mode toggle and /kitkat subcommands (routed from bt_telegram.py) |
+
+**Kitkat** (personal memory agent) has been decoupled into a standalone application at `/opt/kitkat/` with its own FastAPI server on port 8081, own Telegram bot, and sqlite-vec/FTS5 storage. The Device Radar nav bar links to it externally. See `/var/www/kitkat/kitkat_standalone_spec.md` for full documentation.
 
 ## Database
 
@@ -46,8 +44,7 @@ SQLite with WAL mode (`bt_radar.db`). Core tables:
 - **events** — arrival/departure event log with timestamps
 - **news_headlines** — fetched BBC RSS headlines with guid deduplication, feed_key, title, published timestamp
 - **news_read** — per-device read tracking (mac_address + headline_id), ensures headlines aren't repeated
-- **chat_history** — conversation history for Ollama context (Telegram bot uses numeric chat_id, web assistant uses `"web_assistant"`, Kitkat uses `"kitkat_web"` / `"kitkat_telegram_{chat_id}"`)
-- **kitkat_memories** — extracted and manual memories for Kitkat RAG (fact, source, chat_source, chroma_id, is_active flag for soft delete)
+- **chat_history** — conversation history for Ollama context (Telegram bot uses numeric chat_id, web assistant uses `"web_assistant"`)
 - **migrations** — tracks one-time data migrations
 
 Schema is created/migrated in `bt_db.init_db()`. New columns are added via `_add_column()`. One-time data migrations use `_run_migration()`.
@@ -159,8 +156,6 @@ Flask app on port 8080 with dark theme.
 - **History** (`/history`) — filterable paginated event log
 - **Pairing** (`/pairing`) — pair/unpair via web UI
 - **Assistant** (`/assistant`) — Ollama chat interface with "Read on Alexa" toggle, Echo device/voice selection, persistent conversation history
-- **Kitkat** (`/kitkat`) — personal memory agent chat with RAG context badges, memories/stats modals (Flask blueprint registered from `bt_kitkat_web.py`)
-
 ### Key API Endpoints
 - `GET /api/devices` — all devices (filters: state, watchlisted, hidden, scan_type, unmerged)
 - `GET /api/devices/present` — currently detected devices (merged)
@@ -175,15 +170,6 @@ Flask app on port 8080 with dark theme.
 - `POST /api/assistant/chat` — send message to Ollama, returns response (includes `searched` flag when web search was used)
 - `DELETE /api/assistant/history` — clear web assistant conversation
 - `POST /api/assistant/speak` — speak text on Alexa device
-- `POST /api/kitkat/chat` — send message to Kitkat, returns response with RAG context counts and searched flag
-- `GET /api/kitkat/history` — Kitkat conversation history
-- `DELETE /api/kitkat/history` — clear Kitkat conversation
-- `GET /api/kitkat/memories` — list active Kitkat memories
-- `POST /api/kitkat/memories` — add manual memory
-- `DELETE /api/kitkat/memories/<id>` — delete/deactivate a memory
-- `GET /api/kitkat/stats` — ChromaDB collection counts and storage status
-- `POST /api/kitkat/reindex` — trigger background reindex
-- `POST /api/kitkat/reset` — full memory reset (requires `{"confirm": true}`)
 
 ## Proximity Alerts
 
@@ -247,52 +233,6 @@ Requires a tool-calling-capable Ollama model (e.g. `llama3.2:3b`). Models that d
 
 `bt_alexa.py` continues to use raw `httpx` calls to `/api/generate` for greeting and encouragement generation (no web search needed for those use cases).
 
-## Kitkat — Personal Memory Agent
-
-RAG-powered personal memory agent that learns from conversations, indexes personal knowledge sources, and provides context-augmented chat. Modules: `bt_kitkat.py` (core engine), `bt_kitkat_index.py` (indexer), `bt_kitkat_web.py` (Flask blueprint), `bt_kitkat_telegram.py` (Telegram integration).
-
-### How it works
-
-Kitkat chat routes through `bt_search.chat_with_search_sync()` so it inherits web search, tool calling, and model fallback. Before each chat, it retrieves relevant context from four ChromaDB collections (memories, Obsidian notes, Google Drive files, calendar events) using score-based merging — the top N most relevant chunks across all sources are injected into the system prompt. After each exchange, facts are extracted in a background thread and stored as memories.
-
-### Storage
-
-All persistent data lives on the external hard drive at `/mnt/external/kitkat/` (ChromaDB storage, index state, logs). When the drive is unavailable, Kitkat degrades to plain Ollama chat without RAG.
-
-### Indexer
-
-`bt_kitkat_index.py` runs as a systemd service (`bt-kitkat-indexer`) or CLI tool. Indexes three sources:
-- **Obsidian vault** — markdown files chunked by headings, hash-based change detection, orphan cleanup
-- **Google Drive** — text files, PDFs (via `pdftotext`), DOCX (via `pandoc`), same chunking and change detection
-- **Calendar** — via `bt_calendar.get_events()`, full refresh each cycle (next 14 days)
-
-CLI: `python3 bt_kitkat_index.py [--source obsidian|gdrive|calendar] [--stats] [--service]`
-
-### Telegram
-
-`/kitkat` command with subcommands: `on|off` (toggle kitkat mode), `memories`, `stats`, `remember <fact>`, `forget <text>`, `clear`, `reindex`. When kitkat mode is ON, non-command messages route to Kitkat instead of the regular assistant.
-
-### Embedding
-
-Uses `nomic-embed-text:latest` (~270MB, 768-dim vectors) via a custom ChromaDB embedding function with batch support and 6000-char truncation for context length safety.
-
-Config keys in `config.json`:
-- `kitkat_enabled` — toggle on/off
-- `kitkat_data_dir` — ChromaDB storage path (default: `/mnt/external/kitkat`)
-- `kitkat_embedding_model` — Ollama embedding model (default: `nomic-embed-text:latest`)
-- `kitkat_obsidian_path` — path to Obsidian vault
-- `kitkat_gdrive_path` — path to Google Drive mount
-- `kitkat_index_interval_minutes` — indexer cycle interval (default: 30)
-- `kitkat_max_context_chunks` — max RAG chunks per query (default: 8)
-- `kitkat_conversation_history_length` — chat history window (default: 20)
-- `kitkat_calendar_enabled` — index calendar events (default: true)
-- `kitkat_system_prompt` — Kitkat's system prompt
-- `kitkat_memory_extraction_prompt` — prompt for fact extraction
-
-### Code patterns
-
-All functions accept `config: dict[str, Any]` as parameter (no module-level config globals). ChromaDB writes use `threading.Lock` (not asyncio.Lock). Memory extraction runs synchronously in a `ThreadPoolExecutor`. `chat_sync()` is the primary entry point (Flask calls directly); `chat_async()` wraps it for Telegram.
-
 ## Alexa Voice Selection
 
 Per-device configurable TTS voice using Amazon Polly SSML voices. Stored in the `alexa_voice` column (Polly voice name string). Configured via a dropdown in the Settings card on the device detail page.
@@ -321,14 +261,13 @@ sudo python3 bt_scanner.py --discover-wifi   # WiFi/LAN devices
 
 ## Systemd Services
 
-Four services:
+Three services:
 
 | Service | Unit File | Description |
 |---|---|---|
 | `bt-scanner` | `bt-scanner.service` | Background scanner |
 | `bt-web` | `bt-web.service` | Flask web dashboard |
 | `bt-telegram` | `bt-telegram.service` | Telegram bot (loads env from `/home/pi/.device-radar.env`) |
-| `bt-kitkat-indexer` | `bt-kitkat-indexer.service` | Kitkat knowledge indexer (Obsidian, Google Drive, calendar) |
 
 ## Error Handling
 
@@ -358,7 +297,6 @@ python-dotenv>=1.0.0
 caldav>=1.3.0
 vobject>=0.9.6
 ollama>=0.4.0
-chromadb>=0.5.0
 ```
 
 Install: `pip install -r requirements.txt --break-system-packages`
@@ -379,10 +317,6 @@ bt-monitor/
 ├── bt_news.py             # BBC News RSS headline integration
 ├── bt_search.py           # Ollama chat with web search (tool calling agent loop)
 ├── bt_wifi.py             # WiFi/LAN scanning module + targeted ping confirmation
-├── bt_kitkat.py           # Kitkat personal memory RAG engine
-├── bt_kitkat_index.py     # Kitkat background indexer + CLI
-├── bt_kitkat_web.py       # Kitkat Flask blueprint (web chat UI + API)
-├── bt_kitkat_telegram.py  # Kitkat Telegram integration
 ├── config.json            # User configuration (gitignored)
 ├── bt_radar.db            # SQLite database (auto-created, gitignored)
 ├── requirements.txt       # Python dependencies
@@ -390,8 +324,7 @@ bt-monitor/
 ├── bt-scanner.service     # Systemd unit for scanner
 ├── bt-web.service         # Systemd unit for web dashboard
 ├── bt-telegram.service    # Systemd unit for Telegram bot
-├── bt-kitkat-indexer.service  # Systemd unit for Kitkat indexer
-├── templates/             # Jinja2 templates (dashboard, device, history, pairing, assistant, kitkat)
+├── templates/             # Jinja2 templates (dashboard, device, history, pairing, assistant)
 ├── static/                # CSS and JS (dark theme)
 └── README.md
 ```
