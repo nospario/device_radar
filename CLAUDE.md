@@ -34,7 +34,18 @@ Supporting modules:
 | `bt_news.py` | BBC News RSS headline fetching, per-device read tracking, and spoken suffix formatting for Alexa TTS |
 | `bt_search.py` | Ollama chat with web search — tool-calling agent loop using Ollama's `/api/chat` endpoint with `web_search` and `web_fetch` cloud tools; provides sync and async entry points for the web assistant and Telegram bot |
 
-**Kitkat** (personal memory agent) has been decoupled into a standalone application at `/opt/kitkat/` with its own FastAPI server on port 8081, own Telegram bot, and sqlite-vec/FTS5 storage. The Device Radar nav bar links to it externally. See `/var/www/kitkat/kitkat_standalone_spec.md` for full documentation.
+**Kitkat** (personal memory agent) has been decoupled into a standalone application at `/opt/kitkat/` with its own FastAPI server on port 8081, own Telegram bot, and sqlite-vec/FTS5 storage. The Device Radar nav bar links to it externally. Development copy at `/var/www/kitkat/`. See `/var/www/kitkat/kitkat_standalone_spec.md` for full documentation.
+
+### Kitkat Performance Tuning
+
+Kitkat runs on CPU-only Ollama (no GPU) so prompt size and model choice are critical for response time. Current tuning (2026-03-23):
+
+- **Model**: `qwen3:1.7b` (was `llama3.2:3b`) — halves inference time on ARM CPU
+- **Context window**: `num_ctx: 2048` and `num_predict: 256` passed in chat options — prevents KV cache reallocation and caps runaway generation
+- **History**: `conversation_history_length: 8` (was 20) — keeps prompt small
+- **RAG chunks**: `max_context_chunks: 3` (was 5) — less context to process
+- **Ollama config**: `OLLAMA_MAX_LOADED_MODELS=3` in systemd override — keeps chat model + embedding model resident simultaneously, avoids ~20s model reload thrashing
+- **Data storage**: External USB drive at `/mnt/external/kitkat` — prone to I/O errors; check `dmesg` and `ls /mnt/external/` first if Kitkat breaks
 
 ## Database
 
