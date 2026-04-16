@@ -122,16 +122,26 @@ def get_todays_outstanding_tasks(
 def get_daily_recurring_tasks(
     path: str | Path = DEFAULT_DAILY_PATH,
     *,
+    today: date | None = None,
     max_tasks: int = 15,
 ) -> list[str]:
     """Return uncompleted items from the Daily Reoccurring Tasks note.
 
-    Every `- [ ]` line is treated as an outstanding daily task; date markers,
-    if present, are ignored.
+    The Obsidian Tasks plugin handles recurring tasks by creating a fresh
+    ``- [ ]`` instance dated for the next occurrence whenever today's is
+    ticked off — so after you complete a daily task, the file holds both
+    a `- [x]` instance dated today and a `- [ ]` instance dated tomorrow.
+    We exclude any `- [ ]` whose due date is strictly in the future so
+    tomorrow's instance isn't read back at you as still outstanding today.
+    Items with no date, due today, or overdue are all still included.
     """
+    today = today or date.today()
     tasks: list[str] = []
     for done, body in _read_task_lines(Path(path)):
         if done:
+            continue
+        due = _extract_date_after(body, _DUE_EMOJI)
+        if due is not None and due > today:
             continue
         desc = _clean_description(body)
         if desc:

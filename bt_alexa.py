@@ -505,22 +505,26 @@ def _join_sentence(items: list[str]) -> str:
 
 def _bundle_tasks(
     due_today: list[str], daily: list[str], max_per_bundle: int,
-) -> list[dict[str, Any]]:
-    """Split tasks into ordered bundles, keeping due-today and daily separate.
+) -> list[list[dict[str, str]]]:
+    """Split tasks into ordered bundles of up to ``max_per_bundle`` items.
 
-    Each bundle carries a ``group`` ("due_today" or "daily") so the LLM
-    prompt can frame each one appropriately. Size scales automatically with
-    how many tasks are outstanding — more tasks simply produce more bundles.
+    Due-today tasks are listed first so today's time-critical items appear
+    in the earlier bundles; daily habits fill any remaining slots. A bundle
+    is a list of ``{"task", "group"}`` dicts so the LLM can frame each item
+    appropriately even when a bundle mixes both groups.
     """
-    bundles: list[dict[str, Any]] = []
-    for i in range(0, len(due_today), max_per_bundle):
-        bundles.append({"group": "due_today", "items": due_today[i:i + max_per_bundle]})
-    for i in range(0, len(daily), max_per_bundle):
-        bundles.append({"group": "daily", "items": daily[i:i + max_per_bundle]})
+    items: list[dict[str, str]] = []
+    items.extend({"task": t, "group": "due_today"} for t in due_today)
+    items.extend({"task": t, "group": "daily"} for t in daily)
+    bundles: list[list[dict[str, str]]] = []
+    for i in range(0, len(items), max_per_bundle):
+        bundles.append(items[i:i + max_per_bundle])
     return bundles
 
 
-def _bundle_covered(msg: str, items: list[str], min_ratio: float = 0.75) -> bool:
+def _bundle_covered(
+    msg: str, bundle: list[dict[str, str]], min_ratio: float = 0.75,
+) -> bool:
     """Verify the generated message mentions each task in the bundle.
 
     Match on any word longer than 4 chars to be forgiving of minor wording
@@ -528,44 +532,62 @@ def _bundle_covered(msg: str, items: list[str], min_ratio: float = 0.75) -> bool
     """
     lower = msg.lower()
     covered = 0
-    for t in items:
-        words = [w.strip(".,;:!?") for w in t.split() if len(w) > 4]
+    for item in bundle:
+        words = [w.strip(".,;:!?") for w in item["task"].split() if len(w) > 4]
         if not words:
             covered += 1
             continue
         if any(w.lower() in lower for w in words):
             covered += 1
-    return covered >= max(1, int(len(items) * min_ratio))
+    return covered >= max(1, int(len(bundle) * min_ratio))
+
+
+def _bundle_fallback(bundle: list[dict[str, str]]) -> str:
+    """Deterministic read of a bundle, distinguishing due-today and daily."""
+    due = [b["task"] for b in bundle if b["group"] == "due_today"]
+    daily = [b["task"] for b in bundle if b["group"] == "daily"]
+    parts: list[str] = []
+    if due:
+        parts.append("tasks due today: " + _join_sentence(due))
+    if daily:
+        parts.append("daily habits: " + _join_sentence(daily))
+    return "Richard, " + "; and ".join(parts) + "."
 
 
 async def _generate_bundle_message(
-    bundle: dict[str, Any], part_num: int, total_parts: int,
+    bundle: list[dict[str, str]], part_num: int, total_parts: int,
     config: dict[str, Any],
 ) -> str:
     """Generate an Ollama-written reminder for a single bundle.
 
-    Falls back to a deterministic read of the bundle's tasks if Ollama is
-    slow, errors out, or drops tasks from its output.
+    Falls back to a deterministic read if Ollama is slow, errors out, or
+    drops tasks from its output.
     """
     base_url = config.get("ollama_url", "http://localhost:11434")
     timeout = config.get("ollama_timeout_seconds", 30)
     model = config.get("alexa_ollama_model") or config.get("ollama_model", "qwen2.5:1.5b")
 
-    label = "tasks due today" if bundle["group"] == "due_today" else "daily reoccurring tasks"
-    items = bundle["items"]
-    task_list = "\n".join(f"- {t}" for t in items)
+    # Annotate each task with its group so the LLM can frame them naturally
+    # when a bundle contains a mix of due-today items and daily habits.
+    lines = []
+    for item in bundle:
+        tag = "due today" if item["group"] == "due_today" else "daily habit"
+        lines.append(f"- {item['task']} ({tag})")
+    task_list = "\n".join(lines)
 
     series_hint = ""
     if total_parts > 1:
         series_hint = f" This is message {part_num} of {total_parts} in a series."
 
     prompt = (
-        f"Richard has these {label}:\n{task_list}\n\n"
+        f"Richard has these outstanding items:\n{task_list}\n\n"
         f"Write a short, warm, encouraging spoken reminder that names every "
-        f"task above. At most two sentences of friendly framing plus the task "
-        f"names. Target under 300 characters.{series_hint} No emoji, hashtags, "
-        f"bullet points, numbered lists, or quotation marks. Output only the "
-        f"spoken message."
+        f"task above. Use the bracketed labels to frame them naturally — "
+        f"'due today' items are today's commitments, 'daily habit' items are "
+        f"things Richard aims to do every day. At most two sentences of "
+        f"friendly framing plus the task names. Target under 300 characters."
+        f"{series_hint} No emoji, hashtags, bullet points, brackets, or "
+        f"quotation marks. Output only the spoken message."
     )
 
     payload: dict[str, Any] = {
@@ -582,7 +604,7 @@ async def _generate_bundle_message(
             )
             resp.raise_for_status()
             msg = resp.json().get("response", "").strip().strip('"').strip("'")
-            if msg and _bundle_covered(msg, items):
+            if msg and _bundle_covered(msg, bundle):
                 return msg
             logger.warning(
                 "Bundle %d/%d dropped tasks — using plain fallback",
@@ -593,9 +615,7 @@ async def _generate_bundle_message(
     except Exception as e:
         logger.error("Ollama bundle error on %d/%d: %s", part_num, total_parts, e)
 
-    # Deterministic fallback — naming every task in the bundle
-    prefix = "Richard, " + label
-    return f"{prefix}: " + _join_sentence(items) + "."
+    return _bundle_fallback(bundle)
 
 
 async def run_task_reminder_loop(config: dict[str, Any], db_path: Path) -> None:
