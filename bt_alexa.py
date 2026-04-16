@@ -493,23 +493,6 @@ async def run_encourage_loop(config: dict[str, Any], db_path: Path) -> None:
 # Task reminders (Obsidian Master Task List)
 # ---------------------------------------------------------------------------
 
-def _format_task_reminder(due_today: list[str], daily: list[str]) -> str:
-    """Build a terse, deterministic reminder message.
-
-    Every task is included verbatim so nothing is dropped. No weather/time
-    prefix, no LLM, no motivational filler — just the two groups as natural
-    sentences. Keeping the message tight is important because Alexa's Simon
-    Says skill (used by `alexa_remote_control.sh speak:`) rejects anything
-    longer than roughly 500 chars per utterance.
-    """
-    parts: list[str] = []
-    if due_today:
-        parts.append("Tasks due today: " + _join_sentence(due_today) + ".")
-    if daily:
-        parts.append("Daily tasks: " + _join_sentence(daily) + ".")
-    return " ".join(parts)
-
-
 def _join_sentence(items: list[str]) -> str:
     """Join a list of task names into a spoken-friendly sentence fragment."""
     cleaned = [i.rstrip(".") for i in items]
@@ -520,9 +503,115 @@ def _join_sentence(items: list[str]) -> str:
     return ", ".join(cleaned[:-1]) + f", and {cleaned[-1]}"
 
 
+def _bundle_tasks(
+    due_today: list[str], daily: list[str], max_per_bundle: int,
+) -> list[dict[str, Any]]:
+    """Split tasks into ordered bundles, keeping due-today and daily separate.
+
+    Each bundle carries a ``group`` ("due_today" or "daily") so the LLM
+    prompt can frame each one appropriately. Size scales automatically with
+    how many tasks are outstanding — more tasks simply produce more bundles.
+    """
+    bundles: list[dict[str, Any]] = []
+    for i in range(0, len(due_today), max_per_bundle):
+        bundles.append({"group": "due_today", "items": due_today[i:i + max_per_bundle]})
+    for i in range(0, len(daily), max_per_bundle):
+        bundles.append({"group": "daily", "items": daily[i:i + max_per_bundle]})
+    return bundles
+
+
+def _bundle_covered(msg: str, items: list[str], min_ratio: float = 0.75) -> bool:
+    """Verify the generated message mentions each task in the bundle.
+
+    Match on any word longer than 4 chars to be forgiving of minor wording
+    changes. At least ``min_ratio`` of the items must be mentioned.
+    """
+    lower = msg.lower()
+    covered = 0
+    for t in items:
+        words = [w.strip(".,;:!?") for w in t.split() if len(w) > 4]
+        if not words:
+            covered += 1
+            continue
+        if any(w.lower() in lower for w in words):
+            covered += 1
+    return covered >= max(1, int(len(items) * min_ratio))
+
+
+async def _generate_bundle_message(
+    bundle: dict[str, Any], part_num: int, total_parts: int,
+    config: dict[str, Any],
+) -> str:
+    """Generate an Ollama-written reminder for a single bundle.
+
+    Falls back to a deterministic read of the bundle's tasks if Ollama is
+    slow, errors out, or drops tasks from its output.
+    """
+    base_url = config.get("ollama_url", "http://localhost:11434")
+    timeout = config.get("ollama_timeout_seconds", 30)
+    model = config.get("alexa_ollama_model") or config.get("ollama_model", "qwen2.5:1.5b")
+
+    label = "tasks due today" if bundle["group"] == "due_today" else "daily reoccurring tasks"
+    items = bundle["items"]
+    task_list = "\n".join(f"- {t}" for t in items)
+
+    series_hint = ""
+    if total_parts > 1:
+        series_hint = f" This is message {part_num} of {total_parts} in a series."
+
+    prompt = (
+        f"Richard has these {label}:\n{task_list}\n\n"
+        f"Write a short, warm, encouraging spoken reminder that names every "
+        f"task above. At most two sentences of friendly framing plus the task "
+        f"names. Target under 300 characters.{series_hint} No emoji, hashtags, "
+        f"bullet points, numbered lists, or quotation marks. Output only the "
+        f"spoken message."
+    )
+
+    payload: dict[str, Any] = {
+        "model": model,
+        "prompt": prompt,
+        "stream": False,
+        "options": {"num_predict": 220, "temperature": 0.6},
+    }
+
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                f"{base_url}/api/generate", json=payload, timeout=timeout,
+            )
+            resp.raise_for_status()
+            msg = resp.json().get("response", "").strip().strip('"').strip("'")
+            if msg and _bundle_covered(msg, items):
+                return msg
+            logger.warning(
+                "Bundle %d/%d dropped tasks — using plain fallback",
+                part_num, total_parts,
+            )
+    except httpx.TimeoutException:
+        logger.warning("Ollama timed out on bundle %d/%d", part_num, total_parts)
+    except Exception as e:
+        logger.error("Ollama bundle error on %d/%d: %s", part_num, total_parts, e)
+
+    # Deterministic fallback — naming every task in the bundle
+    prefix = "Richard, " + label
+    return f"{prefix}: " + _join_sentence(items) + "."
+
+
 async def run_task_reminder_loop(config: dict[str, Any], db_path: Path) -> None:
-    """Background loop that reads uncompleted Obsidian tasks and speaks a
-    reminder on each Echo device that has the task-reminder toggle enabled."""
+    """Background loop that bundles outstanding Obsidian tasks and speaks a
+    series of short, motivational reminders on each enabled Echo device.
+
+    The tasks for the current cycle are split into bundles of at most
+    ``tasks_max_per_bundle`` items (default 4). Each bundle gets its own
+    Ollama-generated message and is spoken separately; bundles are spaced
+    evenly across ``tasks_bundle_minutes`` (default 10), with a minimum gap
+    of ``tasks_min_bundle_gap_seconds`` (default 30) so Alexa has time to
+    finish speaking before the next utterance is submitted. After the final
+    bundle is dispatched, ``last_tasks_message`` is stamped so the next
+    reminder cycle starts ``tasks_interval`` minutes from *completion*, not
+    from the start of this cycle.
+    """
     logger.info("Task reminder loop started")
 
     while True:
@@ -537,7 +626,6 @@ async def run_task_reminder_loop(config: dict[str, Any], db_path: Path) -> None:
                 devices = bt_db.get_task_reminder_echo_devices(conn)
             finally:
                 conn.close()
-
             if not devices:
                 continue
 
@@ -550,7 +638,6 @@ async def run_task_reminder_loop(config: dict[str, Any], db_path: Path) -> None:
             if not due_devices:
                 continue
 
-            # Read tasks once per loop pass — all due devices share the same list
             master_path = config.get(
                 "obsidian_master_task_path", bt_tasks.DEFAULT_MASTER_PATH,
             )
@@ -562,25 +649,55 @@ async def run_task_reminder_loop(config: dict[str, Any], db_path: Path) -> None:
 
             if not due_today and not daily:
                 logger.debug("No outstanding tasks for today — skipping reminders")
-                # Still update the timestamp so we don't re-check every 60s
                 conn = bt_db.get_connection(db_path)
                 for dev in due_devices:
                     bt_db.update_echo_last_tasks_message(conn, dev["device_name"], now)
                 conn.close()
                 continue
 
-            message = _format_task_reminder(due_today, daily)
+            max_per_bundle = int(config.get("tasks_max_per_bundle", 4))
+            bundle_minutes = float(config.get("tasks_bundle_minutes", 10))
+            min_gap_sec = int(config.get("tasks_min_bundle_gap_seconds", 30))
 
+            bundles = _bundle_tasks(due_today, daily, max_per_bundle)
+            gap_sec = 0.0
+            if len(bundles) > 1:
+                gap_sec = max(
+                    float(min_gap_sec),
+                    bundle_minutes * 60 / (len(bundles) - 1),
+                )
+
+            logger.info(
+                "Task reminders: %d bundle(s), gap %.0fs, devices=%s",
+                len(bundles), gap_sec,
+                [d["device_name"] for d in due_devices],
+            )
+
+            for i, bundle in enumerate(bundles):
+                msg = await _generate_bundle_message(
+                    bundle, i + 1, len(bundles), config,
+                )
+                for dev in due_devices:
+                    device_name = dev["device_name"]
+                    logger.info(
+                        "Task reminder %s [%d/%d]: %s",
+                        device_name, i + 1, len(bundles), msg,
+                    )
+                    if not await speak(msg, config, device=device_name):
+                        logger.error(
+                            "Failed to speak bundle %d/%d on %s",
+                            i + 1, len(bundles), device_name,
+                        )
+                if i < len(bundles) - 1:
+                    await asyncio.sleep(gap_sec)
+
+            # Stamp completion time on every device so the next cycle is
+            # measured from the END of the last bundle in this one.
+            finish = time.time()
+            conn = bt_db.get_connection(db_path)
             for dev in due_devices:
-                device_name = dev["device_name"]
-                logger.info("Task reminder %s: %s", device_name, message)
-                success = await speak(message, config, device=device_name)
-                if success:
-                    conn = bt_db.get_connection(db_path)
-                    bt_db.update_echo_last_tasks_message(conn, device_name, now)
-                    conn.close()
-                else:
-                    logger.error("Failed to speak task reminder on %s", device_name)
+                bt_db.update_echo_last_tasks_message(conn, dev["device_name"], finish)
+            conn.close()
 
         except Exception:
             logger.error("Error in task reminder loop", exc_info=True)
