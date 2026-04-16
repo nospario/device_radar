@@ -447,7 +447,7 @@ def _covers_all_tasks(message: str, tasks: list[str], min_ratio: float = 0.8) ->
 
 
 async def _generate_task_reminder(
-    tasks: list[str], config: dict[str, Any],
+    due_today: list[str], daily: list[str], config: dict[str, Any],
 ) -> str | None:
     """Generate an encouraging reminder message listing today's tasks."""
     base_url = config.get("ollama_url", "http://localhost:11434")
@@ -455,18 +455,31 @@ async def _generate_task_reminder(
     model = config.get("alexa_ollama_model") or config.get("ollama_model", "qwen2.5:1.5b")
 
     today_str = datetime.now().strftime("%A %-d %B %Y")
-    task_list = "\n".join(f"- {t}" for t in tasks)
+
+    sections: list[str] = []
+    if due_today:
+        sections.append(
+            "Tasks due today:\n" + "\n".join(f"- {t}" for t in due_today)
+        )
+    if daily:
+        sections.append(
+            "Daily reoccurring tasks:\n" + "\n".join(f"- {t}" for t in daily)
+        )
+    body = "\n\n".join(sections)
 
     prompt = (
-        f"Today is {today_str}. Richard has the following outstanding tasks "
-        f"that still need doing:\n{task_list}\n\n"
+        f"Today is {today_str}. Richard has the following outstanding items:\n\n"
+        f"{body}\n\n"
         f"Write a warm, encouraging spoken reminder that names EVERY SINGLE "
-        f"task from the list above — do not skip, merge, or omit any. It is "
-        f"fine to be several sentences long. Keep the tone friendly and "
+        f"item from both groups above — do not skip, merge, or omit any. "
+        f"Mention both the tasks due today and the daily reoccurring tasks. "
+        f"It is fine to be several sentences long. Keep the tone friendly and "
         f"motivating. Do not use emoji, hashtags, special characters, bullet "
         f"points, quotation marks, or numbered lists. Output only the spoken "
         f"message."
     )
+
+    all_tasks = due_today + daily
 
     # num_predict large enough that a list of up to 10 tasks is not truncated.
     payload: dict[str, Any] = {
@@ -489,7 +502,7 @@ async def _generate_task_reminder(
             message = message.strip('"').strip("'")
             if not message:
                 return None
-            if not _covers_all_tasks(message, tasks):
+            if not _covers_all_tasks(message, all_tasks):
                 logger.warning(
                     "Task reminder dropped tasks — using plain-read fallback"
                 )
@@ -536,8 +549,13 @@ async def run_task_reminder_loop(config: dict[str, Any], db_path: Path) -> None:
             master_path = config.get(
                 "obsidian_master_task_path", bt_tasks.DEFAULT_MASTER_PATH,
             )
-            tasks = bt_tasks.get_todays_outstanding_tasks(master_path)
-            if not tasks:
+            daily_path = config.get(
+                "obsidian_daily_tasks_path", bt_tasks.DEFAULT_DAILY_PATH,
+            )
+            due_today = bt_tasks.get_todays_outstanding_tasks(master_path)
+            daily = bt_tasks.get_daily_recurring_tasks(daily_path)
+
+            if not due_today and not daily:
                 logger.debug("No outstanding tasks for today — skipping reminders")
                 # Still update the timestamp so we don't re-check every 60s
                 conn = bt_db.get_connection(db_path)
@@ -546,15 +564,21 @@ async def run_task_reminder_loop(config: dict[str, Any], db_path: Path) -> None:
                 conn.close()
                 continue
 
-            message = await _generate_task_reminder(tasks, config)
+            message = await _generate_task_reminder(due_today, daily, config)
             if not message:
-                # Fallback: flat read of task list
-                joined = "; ".join(tasks)
+                # Fallback: flat read of both lists
                 prefix = await _build_prefix(config)
-                message = (
-                    f"{prefix} Richard, you still have these tasks to do today: "
-                    f"{joined}. Give them a go when you can."
-                )
+                parts: list[str] = [prefix]
+                if due_today:
+                    parts.append(
+                        "Richard, tasks due today: " + "; ".join(due_today) + "."
+                    )
+                if daily:
+                    parts.append(
+                        "Daily tasks: " + "; ".join(daily) + "."
+                    )
+                parts.append("Give them a go when you can.")
+                message = " ".join(parts)
 
             for dev in due_devices:
                 device_name = dev["device_name"]

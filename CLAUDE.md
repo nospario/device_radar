@@ -29,7 +29,7 @@ Supporting modules:
 | `bt_pair.py` | Bluetooth pairing/unpairing via `bluetoothctl` subprocess |
 | `bt_wifi.py` | WiFi/LAN device discovery via ping sweep + ARP table parsing; targeted ping confirmation |
 | `bt_alexa.py` | Alexa TTS via `alexa_remote_control.sh`, Ollama-generated welcome greetings, encouragement loop, proximity-triggered messages, per-device SSML voice selection, and Obsidian task-reminder loop |
-| `bt_tasks.py` | Parses the Obsidian Master Task List note for uncompleted tasks due on or before today |
+| `bt_tasks.py` | Parses Obsidian notes (Master Task List + Daily Reoccurring Tasks) for uncompleted tasks |
 | `bt_calendar.py` | Apple Calendar (iCloud CalDAV) integration — event fetching, caching, and prompt context for proximity/welcome messages |
 | `bt_weather.py` | Current weather via Open-Meteo API — fetches temperature and conditions, caches in memory, provides formatted string for Alexa TTS prefix |
 | `bt_news.py` | BBC News RSS headline fetching, per-device read tracking, and spoken suffix formatting for Alexa TTS |
@@ -264,9 +264,14 @@ Requires a tool-calling-capable Ollama model (e.g. `llama3.2:3b`). Models that d
 
 Per-Echo toggle that speaks a reminder of today's outstanding Obsidian tasks on a configurable interval. Module: `bt_tasks.py`; loop in `bt_alexa.run_task_reminder_loop()`.
 
-Tasks live in the Master Task List note (default `/home/nospario/ObsidianVaults/Main/3. Todo Lists/MASTER TASK LIST.md`, overridable via the `obsidian_master_task_path` config key). The parser recognises Obsidian Tasks plugin emoji syntax: `- [ ]`/`- [x]` state, `📅` due, `⏳` scheduled, `🛫` start, `✅` done, plus priority markers. An uncompleted task is considered "for today" when its due date is today or overdue, or (when there is no due date) its scheduled/start date is today or earlier — pure backlog items are excluded. Wikilinks, `#tags` and priority emojis are stripped before the description is spoken.
+Two source notes are read each cycle:
 
-Echo-device fields in `echo_devices`: `tasks_enabled`, `tasks_interval` (minutes, default 120), `last_tasks_message`. Configured via the Alexa page (`/alexa`) alongside Encourage Mode. At most `max_tasks=10` items are sent to Ollama to keep the prompt small. Ollama is asked to produce a warm spoken reminder that names EVERY task — the prompt has no sentence/word cap because small local models silently drop items from long lists when squeezed. `num_predict` is raised to 512 (Ollama's default 128-token cap truncates lists longer than a handful of items) and the timeout is 30s. After generation, `_covers_all_tasks()` verifies that every task is mentioned (match on any word >4 chars); if the model still dropped tasks, the loop falls back to a plain verbatim read of the list, prefixed with the weather/time string from `_build_prefix`. The `last_tasks_message` timestamp is updated even when there are zero tasks so the loop doesn't re-check every minute.
+* **Master Task List** — default `/home/nospario/ObsidianVaults/Main/3. Todo Lists/MASTER TASK LIST.md`, overridable via `obsidian_master_task_path`. Only uncompleted tasks whose `📅` due date is **exactly today** are included. Overdue items and undated backlog are deliberately excluded so the reminder reflects today's commitments, not the whole backlog.
+* **Daily Reoccurring Tasks** — default `/home/nospario/ObsidianVaults/Main/3. Todo Lists/Daily Reoccurring Tasks.md`, overridable via `obsidian_daily_tasks_path`. Every uncompleted `- [ ]` item is treated as a daily habit; dates are ignored on this file.
+
+The parser recognises Obsidian Tasks plugin emoji syntax: `- [ ]`/`- [x]` state, `📅` due, `⏳` scheduled, `🛫` start, `✅` done, `🔁` recurrence, plus priority markers. Wikilinks, `#tags` and all of those emojis are stripped before the description is spoken. Missing files are logged and treated as empty lists — so it's safe to configure a path before the note has synced from Obsidian.
+
+Echo-device fields in `echo_devices`: `tasks_enabled`, `tasks_interval` (minutes, default 120), `last_tasks_message`. Configured via the Alexa page (`/alexa`) alongside Encourage Mode. The two lists are passed to Ollama under separate "Tasks due today" / "Daily reoccurring tasks" headings so the generated message can mention each group distinctly. The prompt has no sentence/word cap because small local models silently drop items when squeezed; `num_predict` is raised to 512 (Ollama's default 128-token cap truncates longer lists) with a 30s timeout. After generation, `_covers_all_tasks()` checks every task is mentioned (match on any word >4 chars across both groups); if the model still dropped tasks, the loop falls back to a plain verbatim read grouped by source, prefixed with the weather/time string from `_build_prefix`. The `last_tasks_message` timestamp is updated even when both lists are empty so the loop doesn't re-check every minute.
 
 ## Alexa Voice Selection
 
