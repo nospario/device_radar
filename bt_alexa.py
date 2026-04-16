@@ -457,26 +457,32 @@ async def _generate_task_reminder(
     today_str = datetime.now().strftime("%A %-d %B %Y")
 
     sections: list[str] = []
+    mentions: list[str] = []
     if due_today:
         sections.append(
             "Tasks due today:\n" + "\n".join(f"- {t}" for t in due_today)
         )
+        mentions.append("the tasks due today")
     if daily:
         sections.append(
             "Daily reoccurring tasks:\n" + "\n".join(f"- {t}" for t in daily)
         )
+        mentions.append("the daily reoccurring tasks")
     body = "\n\n".join(sections)
+    mention_clause = (
+        f" Cover {' and '.join(mentions)}." if len(mentions) > 1 else ""
+    )
 
     prompt = (
         f"Today is {today_str}. Richard has the following outstanding items:\n\n"
         f"{body}\n\n"
         f"Write a warm, encouraging spoken reminder that names EVERY SINGLE "
-        f"item from both groups above — do not skip, merge, or omit any. "
-        f"Mention both the tasks due today and the daily reoccurring tasks. "
-        f"It is fine to be several sentences long. Keep the tone friendly and "
-        f"motivating. Do not use emoji, hashtags, special characters, bullet "
-        f"points, quotation marks, or numbered lists. Output only the spoken "
-        f"message."
+        f"item from the list(s) above — do not skip, merge, omit, or invent "
+        f"any.{mention_clause} Only mention items that appear above; if a "
+        f"group is absent, do not refer to it. It is fine to be several "
+        f"sentences long. Keep the tone friendly and motivating. Do not use "
+        f"emoji, hashtags, special characters, bullet points, quotation marks, "
+        f"or numbered lists. Output only the spoken message."
     )
 
     all_tasks = due_today + daily
