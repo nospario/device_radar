@@ -260,6 +260,10 @@ Requires a tool-calling-capable Ollama model (e.g. `llama3.2:3b`). Models that d
 
 `bt_alexa.py` continues to use raw `httpx` calls to `/api/generate` for greeting and encouragement generation (no web search needed for those use cases).
 
+## Alexa TTS Chunking
+
+`bt_alexa.speak()` speaks via `alexa_remote_control.sh`, which delivers text through Alexa's Simon Says skill (`Alexa.Speak` with `textToSpeak`). That skill rejects utterances above ~500 chars with the error "Sorry I'm having trouble accessing your Simon Says skill right now" — and critically, the alexa_remote_control.sh exit code is still 0 because the rejection happens Alexa-side after the request is accepted. To avoid this, `speak()` chunks long messages on sentence boundaries via `_chunk_tts()` (limit `_MAX_TTS_CHARS = 450`) and sends each chunk as a separate `speak:` invocation with a 4s gap in between. If a single sentence exceeds the limit, the chunker falls back to word-boundary splitting. When an SSML voice is set, each chunk is individually wrapped in `<speak><voice>…</voice></speak>` tags.
+
 ## Obsidian Task Reminders
 
 Per-Echo toggle that speaks a reminder of today's outstanding Obsidian tasks on a configurable interval. Module: `bt_tasks.py`; loop in `bt_alexa.run_task_reminder_loop()`.

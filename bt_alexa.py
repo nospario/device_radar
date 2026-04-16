@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 from datetime import datetime
 from pathlib import Path
@@ -180,33 +181,58 @@ def resolve_device_alias(alias: str, config: dict[str, Any]) -> str | None:
     return None
 
 
-async def speak(
-    message: str, config: dict[str, Any],
-    device: str | None = None, voice: str | None = None,
+# Alexa's Simon Says skill (Alexa.Speak) rejects utterances above ~500 chars
+# with the "I'm having trouble accessing your Simon Says skill" error. We
+# keep a safety margin here and chunk long messages on sentence boundaries.
+_MAX_TTS_CHARS = 450
+
+
+def _chunk_tts(message: str, limit: int = _MAX_TTS_CHARS) -> list[str]:
+    """Split a long plain-text message into chunks on sentence boundaries."""
+    if len(message) <= limit:
+        return [message]
+
+    chunks: list[str] = []
+    current = ""
+    # Split on sentence terminators but keep the punctuation attached
+    parts = re.split(r"(?<=[.!?])\s+", message.strip())
+    for part in parts:
+        if not part:
+            continue
+        if len(part) > limit:
+            # A single sentence exceeds the limit — fall back to word-wrapping
+            words = part.split()
+            piece = ""
+            for w in words:
+                if len(piece) + len(w) + 1 > limit:
+                    if piece:
+                        chunks.append(piece.strip())
+                    piece = w
+                else:
+                    piece = f"{piece} {w}" if piece else w
+            if piece:
+                if current:
+                    chunks.append(current.strip())
+                    current = ""
+                chunks.append(piece.strip())
+            continue
+        if len(current) + len(part) + 1 > limit:
+            chunks.append(current.strip())
+            current = part
+        else:
+            current = f"{current} {part}" if current else part
+    if current:
+        chunks.append(current.strip())
+    return chunks
+
+
+async def _speak_one(
+    message: str, script_path: str, device_name: str,
+    env: dict[str, str], voice: str | None,
 ) -> bool:
-    """Execute alexa_remote_control.sh to speak a message on an Echo device.
-
-    If ``voice`` is set to an Amazon Polly voice name (e.g. "Brian"),
-    the message is wrapped in SSML ``<voice>`` tags.
-    """
-    script_path = config.get("alexa_script_path", "/opt/bt-monitor/alexa_remote_control.sh")
-    device_name = device or config.get("alexa_device_name", "Laura's Echo")
-    env_file = config.get("alexa_env_file", "/home/pi/.alexa-env")
-
-    if not Path(script_path).exists():
-        logger.error("Alexa script not found: %s", script_path)
-        return False
-
-    # Build environment from env file
-    env = _parse_env_file(env_file)
-    if not env.get("REFRESH_TOKEN"):
-        logger.error("REFRESH_TOKEN not found in %s", env_file)
-        return False
-
-    # Wrap in SSML voice tags if a Polly voice is specified
+    """Send a single chunk to alexa_remote_control.sh."""
     if voice:
         message = f"<speak><voice name='{voice}'>{message}</voice></speak>"
-
     try:
         proc = await asyncio.wait_for(
             asyncio.create_subprocess_exec(
@@ -218,25 +244,61 @@ async def speak(
             timeout=30,
         )
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
-
         if proc.returncode != 0:
             logger.error(
                 "Alexa script failed (rc=%d): stdout=%s stderr=%s",
-                proc.returncode,
-                stdout.decode().strip(),
-                stderr.decode().strip(),
+                proc.returncode, stdout.decode().strip(), stderr.decode().strip(),
             )
             return False
-
         logger.debug("Alexa script output: %s", stdout.decode().strip())
         return True
-
     except asyncio.TimeoutError:
         logger.error("Alexa script timed out after 30s")
         return False
     except Exception as e:
         logger.error("Alexa script error: %s", e)
         return False
+
+
+async def speak(
+    message: str, config: dict[str, Any],
+    device: str | None = None, voice: str | None = None,
+) -> bool:
+    """Speak a message on an Echo device via alexa_remote_control.sh.
+
+    Long messages are split on sentence boundaries into chunks that fit the
+    Simon Says skill's character limit and spoken sequentially with a short
+    pause between chunks. If ``voice`` is a Polly voice name, each chunk is
+    individually wrapped in SSML ``<voice>`` tags.
+    """
+    script_path = config.get("alexa_script_path", "/opt/bt-monitor/alexa_remote_control.sh")
+    device_name = device or config.get("alexa_device_name", "Laura's Echo")
+    env_file = config.get("alexa_env_file", "/home/pi/.alexa-env")
+
+    if not Path(script_path).exists():
+        logger.error("Alexa script not found: %s", script_path)
+        return False
+
+    env = _parse_env_file(env_file)
+    if not env.get("REFRESH_TOKEN"):
+        logger.error("REFRESH_TOKEN not found in %s", env_file)
+        return False
+
+    chunks = _chunk_tts(message)
+    if len(chunks) > 1:
+        logger.info(
+            "Splitting %d-char message into %d chunks for %s",
+            len(message), len(chunks), device_name,
+        )
+
+    for i, chunk in enumerate(chunks):
+        ok = await _speak_one(chunk, script_path, device_name, env, voice)
+        if not ok:
+            return False
+        if i < len(chunks) - 1:
+            # Give Alexa a moment to finish the previous utterance
+            await asyncio.sleep(4)
+    return True
 
 
 # ---------------------------------------------------------------------------
