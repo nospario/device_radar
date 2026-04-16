@@ -401,6 +401,10 @@ def api_update_echo_device(name: str):
         kwargs["encourage_interval"] = int(data["encourage_interval"])
     if "encourage_prompt" in data:
         kwargs["encourage_prompt"] = data["encourage_prompt"]
+    if "tasks_enabled" in data:
+        kwargs["tasks_enabled"] = bool(data["tasks_enabled"])
+    if "tasks_interval" in data:
+        kwargs["tasks_interval"] = int(data["tasks_interval"])
 
     bt_db.upsert_echo_device(conn, name, **kwargs)
     conn.close()

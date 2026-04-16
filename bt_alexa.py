@@ -17,6 +17,7 @@ import httpx
 import bt_calendar
 import bt_db
 import bt_news
+import bt_tasks
 import bt_weather
 
 logger = logging.getLogger("bt_alexa")
@@ -420,6 +421,122 @@ async def run_encourage_loop(config: dict[str, Any], db_path: Path) -> None:
 
         except Exception:
             logger.error("Error in encourage loop", exc_info=True)
+
+
+# ---------------------------------------------------------------------------
+# Task reminders (Obsidian Master Task List)
+# ---------------------------------------------------------------------------
+
+async def _generate_task_reminder(
+    tasks: list[str], config: dict[str, Any],
+) -> str | None:
+    """Generate an encouraging reminder message listing today's tasks."""
+    base_url = config.get("ollama_url", "http://localhost:11434")
+    timeout = config.get("ollama_timeout_seconds", 15)
+    model = config.get("alexa_ollama_model") or config.get("ollama_model", "qwen2.5:1.5b")
+
+    today_str = datetime.now().strftime("%A %-d %B %Y")
+    task_list = "\n".join(f"- {t}" for t in tasks)
+
+    prompt = (
+        f"Today is {today_str}. Richard has the following outstanding tasks "
+        f"that still need doing today:\n{task_list}\n\n"
+        f"Write a short, warm, encouraging spoken message (two or three sentences, "
+        f"under 60 words) that gently reminds Richard of these tasks and motivates "
+        f"him to get them done. Mention each task by name. "
+        f"Do not use emoji, hashtags, special characters, bullet points, or quotation marks. "
+        f"Just output the message, nothing else."
+    )
+
+    payload: dict[str, Any] = {"model": model, "prompt": prompt, "stream": False}
+
+    try:
+        async with httpx.AsyncClient() as client:
+            ollama_task = client.post(
+                f"{base_url}/api/generate", json=payload, timeout=timeout,
+            )
+            prefix_task = _build_prefix(config)
+            resp, prefix = await asyncio.gather(ollama_task, prefix_task)
+
+            resp.raise_for_status()
+            message = resp.json().get("response", "").strip()
+            message = message.strip('"').strip("'")
+            if message:
+                return f"{prefix} {message}"
+    except httpx.TimeoutException:
+        logger.warning("Ollama timed out generating task reminder after %ds", timeout)
+    except Exception as e:
+        logger.error("Ollama task reminder error: %s", e)
+    return None
+
+
+async def run_task_reminder_loop(config: dict[str, Any], db_path: Path) -> None:
+    """Background loop that reads uncompleted Obsidian tasks and speaks a
+    reminder on each Echo device that has the task-reminder toggle enabled."""
+    logger.info("Task reminder loop started")
+
+    while True:
+        try:
+            await asyncio.sleep(60)
+
+            if not config.get("alexa_enabled"):
+                continue
+
+            conn = bt_db.get_connection(db_path)
+            try:
+                devices = bt_db.get_task_reminder_echo_devices(conn)
+            finally:
+                conn.close()
+
+            if not devices:
+                continue
+
+            now = time.time()
+            due_devices = [
+                d for d in devices
+                if now - (d.get("last_tasks_message") or 0)
+                >= (d.get("tasks_interval") or 120) * 60
+            ]
+            if not due_devices:
+                continue
+
+            # Read tasks once per loop pass — all due devices share the same list
+            master_path = config.get(
+                "obsidian_master_task_path", bt_tasks.DEFAULT_MASTER_PATH,
+            )
+            tasks = bt_tasks.get_todays_outstanding_tasks(master_path)
+            if not tasks:
+                logger.debug("No outstanding tasks for today — skipping reminders")
+                # Still update the timestamp so we don't re-check every 60s
+                conn = bt_db.get_connection(db_path)
+                for dev in due_devices:
+                    bt_db.update_echo_last_tasks_message(conn, dev["device_name"], now)
+                conn.close()
+                continue
+
+            message = await _generate_task_reminder(tasks, config)
+            if not message:
+                # Fallback: flat read of task list
+                joined = "; ".join(tasks)
+                prefix = await _build_prefix(config)
+                message = (
+                    f"{prefix} Richard, you still have these tasks to do today: "
+                    f"{joined}. Give them a go when you can."
+                )
+
+            for dev in due_devices:
+                device_name = dev["device_name"]
+                logger.info("Task reminder %s: %s", device_name, message)
+                success = await speak(message, config, device=device_name)
+                if success:
+                    conn = bt_db.get_connection(db_path)
+                    bt_db.update_echo_last_tasks_message(conn, device_name, now)
+                    conn.close()
+                else:
+                    logger.error("Failed to speak task reminder on %s", device_name)
+
+        except Exception:
+            logger.error("Error in task reminder loop", exc_info=True)
 
 
 # ---------------------------------------------------------------------------

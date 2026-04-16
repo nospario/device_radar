@@ -28,7 +28,8 @@ Supporting modules:
 | `bt_classify.py` | Device type and manufacturer identification from BLE data, device class codes, and name patterns |
 | `bt_pair.py` | Bluetooth pairing/unpairing via `bluetoothctl` subprocess |
 | `bt_wifi.py` | WiFi/LAN device discovery via ping sweep + ARP table parsing; targeted ping confirmation |
-| `bt_alexa.py` | Alexa TTS via `alexa_remote_control.sh`, Ollama-generated welcome greetings, encouragement loop, proximity-triggered messages, and per-device SSML voice selection |
+| `bt_alexa.py` | Alexa TTS via `alexa_remote_control.sh`, Ollama-generated welcome greetings, encouragement loop, proximity-triggered messages, per-device SSML voice selection, and Obsidian task-reminder loop |
+| `bt_tasks.py` | Parses the Obsidian Master Task List note for uncompleted tasks due on or before today |
 | `bt_calendar.py` | Apple Calendar (iCloud CalDAV) integration — event fetching, caching, and prompt context for proximity/welcome messages |
 | `bt_weather.py` | Current weather via Open-Meteo API — fetches temperature and conditions, caches in memory, provides formatted string for Alexa TTS prefix |
 | `bt_news.py` | BBC News RSS headline fetching, per-device read tracking, and spoken suffix formatting for Alexa TTS |
@@ -259,6 +260,14 @@ Requires a tool-calling-capable Ollama model (e.g. `llama3.2:3b`). Models that d
 
 `bt_alexa.py` continues to use raw `httpx` calls to `/api/generate` for greeting and encouragement generation (no web search needed for those use cases).
 
+## Obsidian Task Reminders
+
+Per-Echo toggle that speaks a reminder of today's outstanding Obsidian tasks on a configurable interval. Module: `bt_tasks.py`; loop in `bt_alexa.run_task_reminder_loop()`.
+
+Tasks live in the Master Task List note (default `/home/nospario/ObsidianVaults/Main/3. Todo Lists/MASTER TASK LIST.md`, overridable via the `obsidian_master_task_path` config key). The parser recognises Obsidian Tasks plugin emoji syntax: `- [ ]`/`- [x]` state, `📅` due, `⏳` scheduled, `🛫` start, `✅` done, plus priority markers. An uncompleted task is considered "for today" when its due date is today or overdue, or (when there is no due date) its scheduled/start date is today or earlier — pure backlog items are excluded. Wikilinks, `#tags` and priority emojis are stripped before the description is spoken.
+
+Echo-device fields in `echo_devices`: `tasks_enabled`, `tasks_interval` (minutes, default 120), `last_tasks_message`. Configured via the Alexa page (`/alexa`) alongside Encourage Mode. At most `max_tasks=10` items are sent to Ollama to keep the prompt small. Ollama is asked for a two-or-three-sentence encouraging spoken message that names each task; if Ollama fails, the loop falls back to a plain read of the task list prefixed with the weather/time string from `_build_prefix`. The `last_tasks_message` timestamp is updated even when there are zero tasks so the loop doesn't re-check every minute.
+
 ## Alexa Voice Selection
 
 Per-device configurable TTS voice using Amazon Polly SSML voices. Stored in the `alexa_voice` column (Polly voice name string). Configured via a dropdown in the Settings card on the device detail page.
@@ -341,6 +350,7 @@ bt-monitor/
 ├── bt_calendar.py         # Apple Calendar (iCloud CalDAV) integration
 ├── bt_weather.py          # Current weather via Open-Meteo API
 ├── bt_news.py             # BBC News RSS headline integration
+├── bt_tasks.py            # Obsidian Master Task List parser
 ├── bt_search.py           # Ollama chat with web search (tool calling agent loop)
 ├── bt_wifi.py             # WiFi/LAN scanning module + targeted ping confirmation
 ├── config.json            # User configuration (gitignored)

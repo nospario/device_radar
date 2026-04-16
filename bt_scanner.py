@@ -650,10 +650,13 @@ class BluetoothRadarScanner:
         except Exception:
             logger.error("Failed to sync paired status on startup", exc_info=True)
 
-        # Start Alexa encourage loop as a background task
+        # Start Alexa encourage + task reminder loops as background tasks
         if self.config.get("alexa_enabled"):
             asyncio.create_task(
                 bt_alexa.run_encourage_loop(self.config, self.db_path)
+            )
+            asyncio.create_task(
+                bt_alexa.run_task_reminder_loop(self.config, self.db_path)
             )
 
         while True:

@@ -133,6 +133,9 @@ def init_db(db_path: str | Path = DEFAULT_DB_PATH) -> None:
             last_encouraged       REAL DEFAULT 0
         );
     """)
+    _add_column(conn, "echo_devices", "tasks_enabled", "INTEGER DEFAULT 0")
+    _add_column(conn, "echo_devices", "tasks_interval", "INTEGER DEFAULT 120")
+    _add_column(conn, "echo_devices", "last_tasks_message", "REAL DEFAULT 0")
 
     # News headlines and per-device read tracking
     conn.executescript("""
@@ -726,6 +729,8 @@ def upsert_echo_device(
     encourage_interval: int | None = None,
     encourage_prompt: str | None = None,
     encourage_when_playing: bool | None = None,
+    tasks_enabled: bool | None = None,
+    tasks_interval: int | None = None,
 ) -> None:
     """Insert or update an Echo device record."""
     conn.execute("""
@@ -751,6 +756,12 @@ def upsert_echo_device(
     if encourage_when_playing is not None:
         sets.append("encourage_when_playing = ?")
         params.append(int(encourage_when_playing))
+    if tasks_enabled is not None:
+        sets.append("tasks_enabled = ?")
+        params.append(int(tasks_enabled))
+    if tasks_interval is not None:
+        sets.append("tasks_interval = ?")
+        params.append(tasks_interval)
 
     if sets:
         params.append(device_name)
@@ -785,12 +796,31 @@ def get_enabled_echo_devices(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     return [dict(r) for r in rows]
 
 
+def get_task_reminder_echo_devices(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """Fetch Echo devices with task reminder mode enabled."""
+    rows = conn.execute(
+        "SELECT * FROM echo_devices WHERE tasks_enabled = 1"
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
 def update_echo_last_encouraged(
     conn: sqlite3.Connection, device_name: str, timestamp: float,
 ) -> None:
     """Update the last_encouraged timestamp for an Echo device."""
     conn.execute(
         "UPDATE echo_devices SET last_encouraged = ? WHERE device_name = ?",
+        (timestamp, device_name),
+    )
+    conn.commit()
+
+
+def update_echo_last_tasks_message(
+    conn: sqlite3.Connection, device_name: str, timestamp: float,
+) -> None:
+    """Update the last_tasks_message timestamp for an Echo device."""
+    conn.execute(
+        "UPDATE echo_devices SET last_tasks_message = ? WHERE device_name = ?",
         (timestamp, device_name),
     )
     conn.commit()

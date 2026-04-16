@@ -244,6 +244,19 @@ async function loadEchoDevices() {
                             <label>Interval (minutes)</label>
                             <input type="number" class="echo-interval" value="${d.encourage_interval}" min="1" max="1440">
                         </div>
+                        <div class="echo-field">
+                            <div class="echo-toggle">
+                                <label class="toggle-switch">
+                                    <input type="checkbox" class="echo-tasks-enabled" ${d.tasks_enabled ? 'checked' : ''}>
+                                    <span class="toggle-slider"></span>
+                                </label>
+                                <span style="font-size:0.85rem;">Task Reminders (Obsidian)</span>
+                            </div>
+                        </div>
+                        <div class="echo-field">
+                            <label>Task Reminder Interval (minutes)</label>
+                            <input type="number" class="echo-tasks-interval" value="${d.tasks_interval || 120}" min="1" max="1440">
+                        </div>
                     </div>
                     <div class="prompt-area">
                         <div class="echo-field">
@@ -271,6 +284,8 @@ async function saveEchoDevice(index) {
         encourage_enabled: card.querySelector('.echo-enabled').checked,
         encourage_interval: parseInt(card.querySelector('.echo-interval').value) || 30,
         encourage_prompt: card.querySelector('.echo-prompt').value,
+        tasks_enabled: card.querySelector('.echo-tasks-enabled').checked,
+        tasks_interval: parseInt(card.querySelector('.echo-tasks-interval').value) || 120,
     };
 
     try {
