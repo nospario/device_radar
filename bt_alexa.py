@@ -184,7 +184,10 @@ def resolve_device_alias(alias: str, config: dict[str, Any]) -> str | None:
 # Alexa's Simon Says skill (Alexa.Speak) rejects utterances above ~500 chars
 # with the "I'm having trouble accessing your Simon Says skill" error. We
 # keep a safety margin here and chunk long messages on sentence boundaries.
-_MAX_TTS_CHARS = 450
+# A 350-char chunk takes roughly 18-22 seconds for Alexa to speak, so we
+# wait long enough between chunks that the previous one has finished.
+_MAX_TTS_CHARS = 350
+_TTS_CHUNK_GAP_SECS = 25
 
 
 def _chunk_tts(message: str, limit: int = _MAX_TTS_CHARS) -> list[str]:
@@ -296,8 +299,9 @@ async def speak(
         if not ok:
             return False
         if i < len(chunks) - 1:
-            # Give Alexa a moment to finish the previous utterance
-            await asyncio.sleep(4)
+            # Give Alexa enough time to finish speaking the previous chunk
+            # before we submit the next one, or it will be interrupted.
+            await asyncio.sleep(_TTS_CHUNK_GAP_SECS)
     return True
 
 
@@ -489,98 +493,31 @@ async def run_encourage_loop(config: dict[str, Any], db_path: Path) -> None:
 # Task reminders (Obsidian Master Task List)
 # ---------------------------------------------------------------------------
 
-def _covers_all_tasks(message: str, tasks: list[str], min_ratio: float = 0.8) -> bool:
-    """Check that a generated message mentions every task (by a distinctive word).
+def _format_task_reminder(due_today: list[str], daily: list[str]) -> str:
+    """Build a terse, deterministic reminder message.
 
-    A task "counts" as mentioned if at least one of its words longer than 4
-    characters appears verbatim in the message (case-insensitive). We require
-    ``min_ratio`` of tasks to pass before accepting the LLM output.
+    Every task is included verbatim so nothing is dropped. No weather/time
+    prefix, no LLM, no motivational filler — just the two groups as natural
+    sentences. Keeping the message tight is important because Alexa's Simon
+    Says skill (used by `alexa_remote_control.sh speak:`) rejects anything
+    longer than roughly 500 chars per utterance.
     """
-    lower = message.lower()
-    covered = 0
-    for t in tasks:
-        words = [w.strip(".,;:!?") for w in t.split() if len(w) > 4]
-        if not words:
-            covered += 1
-            continue
-        if any(w.lower() in lower for w in words):
-            covered += 1
-    return covered >= max(1, int(len(tasks) * min_ratio))
-
-
-async def _generate_task_reminder(
-    due_today: list[str], daily: list[str], config: dict[str, Any],
-) -> str | None:
-    """Generate an encouraging reminder message listing today's tasks."""
-    base_url = config.get("ollama_url", "http://localhost:11434")
-    timeout = config.get("ollama_timeout_seconds", 30)
-    model = config.get("alexa_ollama_model") or config.get("ollama_model", "qwen2.5:1.5b")
-
-    today_str = datetime.now().strftime("%A %-d %B %Y")
-
-    sections: list[str] = []
-    mentions: list[str] = []
+    parts: list[str] = []
     if due_today:
-        sections.append(
-            "Tasks due today:\n" + "\n".join(f"- {t}" for t in due_today)
-        )
-        mentions.append("the tasks due today")
+        parts.append("Tasks due today: " + _join_sentence(due_today) + ".")
     if daily:
-        sections.append(
-            "Daily reoccurring tasks:\n" + "\n".join(f"- {t}" for t in daily)
-        )
-        mentions.append("the daily reoccurring tasks")
-    body = "\n\n".join(sections)
-    mention_clause = (
-        f" Cover {' and '.join(mentions)}." if len(mentions) > 1 else ""
-    )
+        parts.append("Daily tasks: " + _join_sentence(daily) + ".")
+    return " ".join(parts)
 
-    prompt = (
-        f"Today is {today_str}. Richard has the following outstanding items:\n\n"
-        f"{body}\n\n"
-        f"Write a warm, encouraging spoken reminder that names EVERY SINGLE "
-        f"item from the list(s) above — do not skip, merge, omit, or invent "
-        f"any.{mention_clause} Only mention items that appear above; if a "
-        f"group is absent, do not refer to it. It is fine to be several "
-        f"sentences long. Keep the tone friendly and motivating. Do not use "
-        f"emoji, hashtags, special characters, bullet points, quotation marks, "
-        f"or numbered lists. Output only the spoken message."
-    )
 
-    all_tasks = due_today + daily
-
-    # num_predict large enough that a list of up to 10 tasks is not truncated.
-    payload: dict[str, Any] = {
-        "model": model,
-        "prompt": prompt,
-        "stream": False,
-        "options": {"num_predict": 512, "temperature": 0.6},
-    }
-
-    try:
-        async with httpx.AsyncClient() as client:
-            ollama_task = client.post(
-                f"{base_url}/api/generate", json=payload, timeout=timeout,
-            )
-            prefix_task = _build_prefix(config)
-            resp, prefix = await asyncio.gather(ollama_task, prefix_task)
-
-            resp.raise_for_status()
-            message = resp.json().get("response", "").strip()
-            message = message.strip('"').strip("'")
-            if not message:
-                return None
-            if not _covers_all_tasks(message, all_tasks):
-                logger.warning(
-                    "Task reminder dropped tasks — using plain-read fallback"
-                )
-                return None
-            return f"{prefix} {message}"
-    except httpx.TimeoutException:
-        logger.warning("Ollama timed out generating task reminder after %ds", timeout)
-    except Exception as e:
-        logger.error("Ollama task reminder error: %s", e)
-    return None
+def _join_sentence(items: list[str]) -> str:
+    """Join a list of task names into a spoken-friendly sentence fragment."""
+    cleaned = [i.rstrip(".") for i in items]
+    if len(cleaned) == 1:
+        return cleaned[0]
+    if len(cleaned) == 2:
+        return f"{cleaned[0]} and {cleaned[1]}"
+    return ", ".join(cleaned[:-1]) + f", and {cleaned[-1]}"
 
 
 async def run_task_reminder_loop(config: dict[str, Any], db_path: Path) -> None:
@@ -632,21 +569,7 @@ async def run_task_reminder_loop(config: dict[str, Any], db_path: Path) -> None:
                 conn.close()
                 continue
 
-            message = await _generate_task_reminder(due_today, daily, config)
-            if not message:
-                # Fallback: flat read of both lists
-                prefix = await _build_prefix(config)
-                parts: list[str] = [prefix]
-                if due_today:
-                    parts.append(
-                        "Richard, tasks due today: " + "; ".join(due_today) + "."
-                    )
-                if daily:
-                    parts.append(
-                        "Daily tasks: " + "; ".join(daily) + "."
-                    )
-                parts.append("Give them a go when you can.")
-                message = " ".join(parts)
+            message = _format_task_reminder(due_today, daily)
 
             for dev in due_devices:
                 device_name = dev["device_name"]
