@@ -190,6 +190,35 @@ _MAX_TTS_CHARS = 350
 _TTS_CHUNK_GAP_SECS = 25
 
 
+def _sanitize_for_tts(message: str) -> str:
+    """Strip or replace characters that break Alexa's Simon Says skill.
+
+    The Simon Says skill responds with "I'm having trouble accessing your
+    Simon Says skill right now" when the utterance contains characters that
+    break the server-side SSML/XML parse — in particular ``&``, ``<``, ``>``,
+    angle quotes, and stray brackets from LLM annotations. Curly quotes and
+    em-dashes are also normalised so they speak cleanly.
+    """
+    replacements = {
+        "&": " and ",
+        "<": "",
+        ">": "",
+        "[": "",
+        "]": "",
+        "\u2018": "'",   # left single smart quote
+        "\u2019": "'",   # right single smart quote
+        "\u201C": '"',   # left double smart quote
+        "\u201D": '"',   # right double smart quote
+        "\u2013": "-",   # en dash
+        "\u2014": "-",   # em dash
+        "\u2026": "...",  # ellipsis
+    }
+    for bad, good in replacements.items():
+        message = message.replace(bad, good)
+    # Collapse any whitespace runs introduced by the substitutions
+    return " ".join(message.split())
+
+
 def _chunk_tts(message: str, limit: int = _MAX_TTS_CHARS) -> list[str]:
     """Split a long plain-text message into chunks on sentence boundaries."""
     if len(message) <= limit:
@@ -287,6 +316,7 @@ async def speak(
         logger.error("REFRESH_TOKEN not found in %s", env_file)
         return False
 
+    message = _sanitize_for_tts(message)
     chunks = _chunk_tts(message)
     if len(chunks) > 1:
         logger.info(
