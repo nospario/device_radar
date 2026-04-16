@@ -427,12 +427,31 @@ async def run_encourage_loop(config: dict[str, Any], db_path: Path) -> None:
 # Task reminders (Obsidian Master Task List)
 # ---------------------------------------------------------------------------
 
+def _covers_all_tasks(message: str, tasks: list[str], min_ratio: float = 0.8) -> bool:
+    """Check that a generated message mentions every task (by a distinctive word).
+
+    A task "counts" as mentioned if at least one of its words longer than 4
+    characters appears verbatim in the message (case-insensitive). We require
+    ``min_ratio`` of tasks to pass before accepting the LLM output.
+    """
+    lower = message.lower()
+    covered = 0
+    for t in tasks:
+        words = [w.strip(".,;:!?") for w in t.split() if len(w) > 4]
+        if not words:
+            covered += 1
+            continue
+        if any(w.lower() in lower for w in words):
+            covered += 1
+    return covered >= max(1, int(len(tasks) * min_ratio))
+
+
 async def _generate_task_reminder(
     tasks: list[str], config: dict[str, Any],
 ) -> str | None:
     """Generate an encouraging reminder message listing today's tasks."""
     base_url = config.get("ollama_url", "http://localhost:11434")
-    timeout = config.get("ollama_timeout_seconds", 15)
+    timeout = config.get("ollama_timeout_seconds", 30)
     model = config.get("alexa_ollama_model") or config.get("ollama_model", "qwen2.5:1.5b")
 
     today_str = datetime.now().strftime("%A %-d %B %Y")
@@ -440,15 +459,22 @@ async def _generate_task_reminder(
 
     prompt = (
         f"Today is {today_str}. Richard has the following outstanding tasks "
-        f"that still need doing today:\n{task_list}\n\n"
-        f"Write a short, warm, encouraging spoken message (two or three sentences, "
-        f"under 60 words) that gently reminds Richard of these tasks and motivates "
-        f"him to get them done. Mention each task by name. "
-        f"Do not use emoji, hashtags, special characters, bullet points, or quotation marks. "
-        f"Just output the message, nothing else."
+        f"that still need doing:\n{task_list}\n\n"
+        f"Write a warm, encouraging spoken reminder that names EVERY SINGLE "
+        f"task from the list above — do not skip, merge, or omit any. It is "
+        f"fine to be several sentences long. Keep the tone friendly and "
+        f"motivating. Do not use emoji, hashtags, special characters, bullet "
+        f"points, quotation marks, or numbered lists. Output only the spoken "
+        f"message."
     )
 
-    payload: dict[str, Any] = {"model": model, "prompt": prompt, "stream": False}
+    # num_predict large enough that a list of up to 10 tasks is not truncated.
+    payload: dict[str, Any] = {
+        "model": model,
+        "prompt": prompt,
+        "stream": False,
+        "options": {"num_predict": 512, "temperature": 0.6},
+    }
 
     try:
         async with httpx.AsyncClient() as client:
@@ -461,8 +487,14 @@ async def _generate_task_reminder(
             resp.raise_for_status()
             message = resp.json().get("response", "").strip()
             message = message.strip('"').strip("'")
-            if message:
-                return f"{prefix} {message}"
+            if not message:
+                return None
+            if not _covers_all_tasks(message, tasks):
+                logger.warning(
+                    "Task reminder dropped tasks — using plain-read fallback"
+                )
+                return None
+            return f"{prefix} {message}"
     except httpx.TimeoutException:
         logger.warning("Ollama timed out generating task reminder after %ds", timeout)
     except Exception as e:
