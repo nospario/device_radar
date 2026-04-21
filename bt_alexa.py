@@ -817,25 +817,31 @@ async def run_telegram_habit_reminder_loop(config: dict[str, Any]) -> None:
             daily_notes_dir = config.get(
                 "obsidian_daily_notes_dir", bt_tasks.DEFAULT_DAILY_NOTES_DIR,
             )
-            habits = bt_tasks.get_daily_recurring_tasks(daily_notes_dir)
-            if not habits:
+            outstanding = bt_tasks.get_daily_recurring_tasks(daily_notes_dir)
+            if not outstanding:
                 logger.info("No outstanding habits — skipping telegram reminder")
                 continue
 
-            lines = [f"<b>Outstanding habits ({len(habits)})</b>"]
-            lines.extend(f"• {html.escape(h)}" for h in habits)
+            all_habits = bt_tasks.get_all_habits(daily_notes_dir)
+            total = len(all_habits)
+            done_count = sum(1 for _, done in all_habits if done)
+            text = (
+                f"<b>Habits: {done_count}/{total} complete</b>\n"
+                f"Tap to toggle."
+            )
             keyboard = {
                 "inline_keyboard": [
-                    [{"text": h, "callback_data": f"habit:{bt_tasks.habit_hash(h)}"}]
-                    for h in habits
+                    [{
+                        "text": f"✓ {desc}" if done else desc,
+                        "callback_data": f"habit:{bt_tasks.habit_hash(desc)}",
+                    }]
+                    for desc, done in all_habits
                 ],
             }
-            await bt_telegram.send_message(
-                "\n".join(lines), reply_markup=keyboard,
-            )
+            await bt_telegram.send_message(text, reply_markup=keyboard)
             logger.info(
-                "Sent telegram habit reminder: %d outstanding habit(s)",
-                len(habits),
+                "Sent telegram habit reminder: %d/%d complete (%d outstanding)",
+                done_count, total, len(outstanding),
             )
         except asyncio.CancelledError:
             raise

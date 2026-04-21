@@ -617,32 +617,43 @@ def _habits_daily_notes_dir() -> str:
     )
 
 
-def _build_habit_keyboard(habits: list[str]) -> "InlineKeyboardMarkup | None":
-    """Build a vertical inline keyboard — one tappable button per habit."""
+def _build_habit_keyboard(
+    habits: list[tuple[str, bool]],
+) -> "InlineKeyboardMarkup | None":
+    """Build a vertical toggle keyboard — one button per habit, with a ✓
+    prefix on completed ones. Tapping any button toggles state."""
     if not habits:
         return None
-    rows = [
-        [InlineKeyboardButton(
-            h, callback_data=f"habit:{bt_tasks.habit_hash(h)}",
-        )]
-        for h in habits
-    ]
+    rows = []
+    for desc, done in habits:
+        label = f"✓ {desc}" if done else desc
+        rows.append([InlineKeyboardButton(
+            label, callback_data=f"habit:{bt_tasks.habit_hash(desc)}",
+        )])
     return InlineKeyboardMarkup(rows)
 
 
-def _render_habit_message(habits: list[str]) -> str:
+def _render_habit_message(habits: list[tuple[str, bool]]) -> str:
     if not habits:
-        return "<b>All habits complete for today.</b>"
-    lines = [f"<b>Outstanding habits ({len(habits)})</b>"]
-    lines.extend(f"• {html.escape(h)}" for h in habits)
-    return "\n".join(lines)
+        return "<b>No habits in today's Daily Note.</b>"
+    total = len(habits)
+    done_count = sum(1 for _, done in habits if done)
+    if done_count == total:
+        return (
+            f"<b>All {total} habits complete for today.</b>\n"
+            f"Tap any to un-tick."
+        )
+    return (
+        f"<b>Habits: {done_count}/{total} complete</b>\n"
+        f"Tap to toggle."
+    )
 
 
 async def _cmd_habits(update, context) -> None:
-    """Handle /habits — list today's outstanding #habit items with tap-to-complete buttons."""
+    """Handle /habits — list all of today's #habit items with tap-to-toggle buttons."""
     if not _is_authorized(update.effective_chat.id):
         return
-    habits = bt_tasks.get_daily_recurring_tasks(_habits_daily_notes_dir())
+    habits = bt_tasks.get_all_habits(_habits_daily_notes_dir())
     await update.message.reply_text(
         _render_habit_message(habits),
         parse_mode="HTML",
@@ -651,7 +662,8 @@ async def _cmd_habits(update, context) -> None:
 
 
 async def _on_habit_callback(update, context) -> None:
-    """Handle a habit-button tap: mark complete, refresh the message in place."""
+    """Handle a habit-button tap: toggle state in the Daily Note and
+    refresh the message in place."""
     query = update.callback_query
     if not _is_authorized(query.from_user.id if query.from_user else 0) and not _is_authorized(
         query.message.chat.id if query.message else 0,
@@ -667,26 +679,25 @@ async def _on_habit_callback(update, context) -> None:
     target_hash = data.split(":", 1)[1]
 
     daily_notes_dir = _habits_daily_notes_dir()
-    current = bt_tasks.get_daily_recurring_tasks(daily_notes_dir)
+    current = bt_tasks.get_all_habits(daily_notes_dir)
     matched = next(
-        (h for h in current if bt_tasks.habit_hash(h) == target_hash), None,
+        ((desc, done) for desc, done in current
+         if bt_tasks.habit_hash(desc) == target_hash),
+        None,
     )
 
-    if matched is None:
-        # Already completed (possibly from Obsidian or another tap); just refresh.
-        remaining = current
-    elif bt_tasks.complete_habit_by_name(
-        daily_notes_dir, description=matched,
-    ):
-        remaining = bt_tasks.get_daily_recurring_tasks(daily_notes_dir)
-    else:
-        remaining = current  # write failed — show current state unchanged
+    if matched is not None:
+        desc, currently_done = matched
+        bt_tasks.set_habit_done_state(
+            daily_notes_dir, description=desc, done=not currently_done,
+        )
 
+    refreshed = bt_tasks.get_all_habits(daily_notes_dir)
     try:
         await query.edit_message_text(
-            _render_habit_message(remaining),
+            _render_habit_message(refreshed),
             parse_mode="HTML",
-            reply_markup=_build_habit_keyboard(remaining),
+            reply_markup=_build_habit_keyboard(refreshed),
         )
     except Exception as e:
         # Most common: "message is not modified" when nothing changed

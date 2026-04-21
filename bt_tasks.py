@@ -265,18 +265,60 @@ def habit_hash(description: str) -> str:
     return hashlib.sha256(description.encode("utf-8")).hexdigest()[:16]
 
 
-def complete_habit_by_name(
+def get_all_habits(
+    daily_notes_dir: str | Path = DEFAULT_DAILY_NOTES_DIR,
+    *,
+    today: date | None = None,
+    max_tasks: int = 20,
+) -> list[tuple[str, bool]]:
+    """Return every ``#habit`` line in today's Daily Note as
+    ``(description, completed)`` pairs, preserving file order.
+
+    Used to render the Telegram toggle keyboard, which needs to show both
+    outstanding and completed habits so an accidental tap can be undone.
+    """
+    today = today or date.today()
+    path = _todays_daily_note(daily_notes_dir, today)
+    results: list[tuple[str, bool]] = []
+    for done, body in _read_task_lines(path):
+        if not _has_habit_tag(body):
+            continue
+        desc = _clean_description(body)
+        if desc:
+            results.append((desc, done))
+    return results[:max_tasks]
+
+
+def _remove_done_stamp(body: str) -> str:
+    """Strip a trailing ``✅ YYYY-MM-DD`` stamp (and surrounding whitespace)
+    from a task body, if present."""
+    idx = body.find(_DONE_EMOJI)
+    if idx == -1:
+        return body
+    after = body[idx + len(_DONE_EMOJI):]
+    m = _DATE_RE.match(after.lstrip())
+    if m:
+        lead_ws = len(after) - len(after.lstrip())
+        tail = after[lead_ws + len(m.group(1)):]
+        return (body[:idx].rstrip() + tail).rstrip()
+    return (body[:idx].rstrip() + after).rstrip()
+
+
+def set_habit_done_state(
     daily_notes_dir: str | Path = DEFAULT_DAILY_NOTES_DIR,
     *,
     description: str,
+    done: bool,
     today: date | None = None,
 ) -> bool:
-    """Mark a single uncompleted ``#habit`` line matching ``description``
-    complete in today's Daily Note.
+    """Toggle a single ``#habit`` line's completion state in today's note.
 
-    Match is against the cleaned description (the text shown in the bot's
-    button). Returns True if a line was updated. First match wins if there
-    are duplicates.
+    If ``done`` is True, the line becomes ``- [x] ... ✅ YYYY-MM-DD`` (a
+    stamp is added if none was present). If ``done`` is False, the line
+    becomes ``- [ ] ...`` with any ``✅`` stamp stripped so it doesn't
+    linger. Returns True if a matching line was updated; first match wins.
+    Idempotent — if the line is already in the requested state, no write
+    happens and the function returns False.
     """
     today = today or date.today()
     path = _todays_daily_note(daily_notes_dir, today)
@@ -292,18 +334,19 @@ def complete_habit_by_name(
 
     lines = original.splitlines(keepends=True)
     new_lines: list[str] = []
-    done = False
+    updated = False
 
     for line in lines:
-        if done:
+        if updated:
             new_lines.append(line)
             continue
         stripped = line.rstrip("\r\n")
         ending = line[len(stripped):]
         m = _TASK_LINE_RE.match(stripped)
-        if not m or m.group("state").lower() == "x":
+        if not m:
             new_lines.append(line)
             continue
+        currently_done = m.group("state").lower() == "x"
         body = m.group("body")
         if not _has_habit_tag(body):
             new_lines.append(line)
@@ -311,22 +354,28 @@ def complete_habit_by_name(
         if _clean_description(body) != description:
             new_lines.append(line)
             continue
+        if currently_done == done:
+            new_lines.append(line)
+            continue  # already in the desired state — keep scanning (no match for toggle)
 
-        marker_idx = stripped.index("[ ]")
-        prefix = stripped[:marker_idx]
-        completed_body = body
-        if _DONE_EMOJI not in completed_body:
-            completed_body = completed_body.rstrip() + f" {_DONE_EMOJI} {today.isoformat()}"
-        new_lines.append(f"{prefix}[x] {completed_body}{ending}")
-        done = True
+        prefix = stripped[:stripped.index("[")]
+        if done:
+            new_body = body
+            if _DONE_EMOJI not in new_body:
+                new_body = new_body.rstrip() + f" {_DONE_EMOJI} {today.isoformat()}"
+            new_lines.append(f"{prefix}[x] {new_body}{ending}")
+        else:
+            new_body = _remove_done_stamp(body)
+            new_lines.append(f"{prefix}[ ] {new_body}{ending}")
+        updated = True
 
-    if not done:
+    if not updated:
         return False
 
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text("".join(new_lines), encoding="utf-8")
     tmp.replace(path)
-    logger.info("Completed habit %r in %s", description, path)
+    logger.info("Set habit %r done=%s in %s", description, done, path)
     return True
 
 
