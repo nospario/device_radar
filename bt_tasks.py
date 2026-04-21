@@ -1,11 +1,14 @@
 """Obsidian task list readers.
 
-Parses Obsidian markdown notes written with the Tasks plugin emoji syntax.
-Two sources are supported:
+Parses the Master Task List (Obsidian Tasks plugin emoji syntax) into two
+groups:
 
-* The Master Task List — we return uncompleted tasks whose due date is today.
-* The Daily Reoccurring Tasks note — every uncompleted `- [ ]` item is
-  returned as a daily habit (no date filter).
+* **Due today** — uncompleted tasks whose `📅` due date is exactly today,
+  excluding any tagged ``#habit``.
+* **Daily habits** — uncompleted tasks tagged ``#habit``. Items with no
+  date, due today, or overdue are included; items dated strictly in the
+  future are skipped (those are tomorrow's recurrence instance that the
+  Tasks plugin stamps when today's is ticked off).
 """
 
 from __future__ import annotations
@@ -20,12 +23,10 @@ logger = logging.getLogger("bt_tasks")
 DEFAULT_MASTER_PATH = (
     "/home/nospario/ObsidianVaults/Main/3. Todo Lists/MASTER TASK LIST.md"
 )
-DEFAULT_DAILY_PATH = (
-    "/home/nospario/ObsidianVaults/Main/3. Todo Lists/Daily Reoccurring Tasks.md"
-)
 
 _TASK_LINE_RE = re.compile(r"^\s*-\s*\[(?P<state>[ xX])\]\s*(?P<body>.*)$")
 _DATE_RE = re.compile(r"(\d{4}-\d{2}-\d{2})")
+_HABIT_TAG_RE = re.compile(r"#habit(?![A-Za-z0-9_-])", re.IGNORECASE)
 
 # Tasks plugin date emoji → field name
 _DUE_EMOJI = "\U0001F4C5"       # 📅
@@ -95,20 +96,28 @@ def _read_task_lines(path: Path) -> list[tuple[bool, str]]:
     return out
 
 
+def _has_habit_tag(body: str) -> bool:
+    """True if the raw task body contains the ``#habit`` tag as a whole word."""
+    return bool(_HABIT_TAG_RE.search(body))
+
+
 def get_todays_outstanding_tasks(
     path: str | Path = DEFAULT_MASTER_PATH,
     *,
     today: date | None = None,
     max_tasks: int = 10,
 ) -> list[str]:
-    """Return uncompleted task descriptions whose due date is today.
+    """Return uncompleted tasks due today, excluding ``#habit`` items.
 
-    Overdue tasks and tasks with no due date are excluded.
+    Overdue tasks and tasks with no due date are excluded. Habit-tagged
+    tasks are returned by :func:`get_daily_recurring_tasks` instead.
     """
     today = today or date.today()
     tasks: list[str] = []
     for done, body in _read_task_lines(Path(path)):
         if done:
+            continue
+        if _has_habit_tag(body):
             continue
         due = _extract_date_after(body, _DUE_EMOJI)
         if due != today:
@@ -120,25 +129,24 @@ def get_todays_outstanding_tasks(
 
 
 def get_daily_recurring_tasks(
-    path: str | Path = DEFAULT_DAILY_PATH,
+    path: str | Path = DEFAULT_MASTER_PATH,
     *,
     today: date | None = None,
     max_tasks: int = 15,
 ) -> list[str]:
-    """Return uncompleted items from the Daily Reoccurring Tasks note.
+    """Return uncompleted ``#habit``-tagged tasks from the master list.
 
-    The Obsidian Tasks plugin handles recurring tasks by creating a fresh
-    ``- [ ]`` instance dated for the next occurrence whenever today's is
-    ticked off — so after you complete a daily task, the file holds both
-    a `- [x]` instance dated today and a `- [ ]` instance dated tomorrow.
-    We exclude any `- [ ]` whose due date is strictly in the future so
-    tomorrow's instance isn't read back at you as still outstanding today.
-    Items with no date, due today, or overdue are all still included.
+    Items with no date, due today, or overdue are all included. Items
+    dated strictly in the future are skipped — the Obsidian Tasks plugin
+    stamps tomorrow's recurrence when today's is ticked off, and we don't
+    want that instance read back as still outstanding today.
     """
     today = today or date.today()
     tasks: list[str] = []
     for done, body in _read_task_lines(Path(path)):
         if done:
+            continue
+        if not _has_habit_tag(body):
             continue
         due = _extract_date_after(body, _DUE_EMOJI)
         if due is not None and due > today:
