@@ -133,6 +133,37 @@ def _todays_daily_note(dir_path: str | Path, today: date) -> Path:
     return Path(dir_path) / f"{today.isoformat()}.md"
 
 
+def summarize_habits(
+    daily_notes_dir: str | Path = DEFAULT_DAILY_NOTES_DIR,
+    *,
+    for_date: date,
+) -> tuple[int, int, list[str]] | None:
+    """Summarise ``#habit`` completion for a specific day's Daily Note.
+
+    Returns ``(total, completed, incomplete_descriptions)`` or ``None`` if
+    the note doesn't exist. ``incomplete_descriptions`` is the cleaned
+    spoken text for each uncompleted habit.
+    """
+    path = _todays_daily_note(daily_notes_dir, for_date)
+    if not path.exists():
+        return None
+
+    total = 0
+    completed = 0
+    incomplete: list[str] = []
+    for done, body in _read_task_lines(path):
+        if not _has_habit_tag(body):
+            continue
+        total += 1
+        if done:
+            completed += 1
+        else:
+            desc = _clean_description(body)
+            if desc:
+                incomplete.append(desc)
+    return total, completed, incomplete
+
+
 def get_daily_recurring_tasks(
     daily_notes_dir: str | Path = DEFAULT_DAILY_NOTES_DIR,
     *,

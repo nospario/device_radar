@@ -838,6 +838,167 @@ async def run_telegram_habit_reminder_loop(config: dict[str, Any]) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Morning Telegram habit summary
+# ---------------------------------------------------------------------------
+
+def _incomplete_habits_covered(
+    msg: str, incomplete: list[str], min_ratio: float = 0.75,
+) -> bool:
+    """Verify the summary mentions each incomplete habit.
+
+    Uses word-match on tokens >4 chars to be forgiving of minor rephrasing.
+    At least ``min_ratio`` of the habits must be mentioned.
+    """
+    if not incomplete:
+        return True
+    lower = msg.lower()
+    covered = 0
+    for habit in incomplete:
+        words = [w for w in re.findall(r"\w+", habit.lower()) if len(w) > 4]
+        if not words or any(w in lower for w in words):
+            covered += 1
+    return covered / len(incomplete) >= min_ratio
+
+
+def _habit_summary_fallback(
+    total: int, completed: int, incomplete: list[str],
+) -> str:
+    pct = round((completed / total) * 100) if total else 0
+    if completed == total:
+        return (
+            f"Good morning Richard. You completed all {total} of your daily "
+            f"habits yesterday. Fantastic work — keep the streak going."
+        )
+    missed = _join_sentence(incomplete) if incomplete else "none"
+    return (
+        f"Good morning Richard. You completed {completed} of {total} daily "
+        f"habits yesterday ({pct} percent). Habits missed: {missed}."
+    )
+
+
+async def _generate_habit_summary_message(
+    total: int, completed: int, incomplete: list[str],
+    config: dict[str, Any],
+) -> str:
+    """Ollama-generated morning summary, with deterministic fallback."""
+    base_url = config.get("ollama_url", "http://localhost:11434")
+    timeout = config.get("ollama_timeout_seconds", 30)
+    model = config.get("alexa_ollama_model") or config.get("ollama_model", "qwen2.5:1.5b")
+    pct = round((completed / total) * 100) if total else 0
+
+    if completed == total:
+        prompt = (
+            f"Richard completed all {total} of his daily habits yesterday "
+            f"(100 percent). Write a short, celebratory morning message "
+            f"(one sentence). Start with 'Good morning'. Mention he hit "
+            f"all {total} habits. No emoji, hashtags, brackets, or quotation "
+            f"marks. Output only the message."
+        )
+    else:
+        habit_list = "\n".join(f"- {h}" for h in incomplete)
+        prompt = (
+            f"Richard completed {completed} out of {total} daily habits "
+            f"yesterday ({pct} percent). The habits he did NOT complete:\n"
+            f"{habit_list}\n\n"
+            f"Write a short, warm morning summary (1-2 sentences). Start "
+            f"with 'Good morning'. Include the completion count/percentage "
+            f"and name every incomplete habit naturally. Be encouraging "
+            f"but honest. No emoji, hashtags, brackets, or quotation marks. "
+            f"Output only the message."
+        )
+
+    payload: dict[str, Any] = {
+        "model": model,
+        "prompt": prompt,
+        "stream": False,
+        "options": {"num_predict": 220, "temperature": 0.6},
+    }
+
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                f"{base_url}/api/generate", json=payload, timeout=timeout,
+            )
+            resp.raise_for_status()
+            msg = resp.json().get("response", "").strip().strip('"').strip("'")
+            if msg and _incomplete_habits_covered(msg, incomplete):
+                return msg
+            logger.warning(
+                "Habit summary dropped habits — using fallback",
+            )
+    except httpx.TimeoutException:
+        logger.warning("Ollama timed out on habit summary")
+    except Exception as e:
+        logger.error("Ollama habit summary error: %s", e)
+
+    return _habit_summary_fallback(total, completed, incomplete)
+
+
+async def run_telegram_habit_summary_loop(config: dict[str, Any]) -> None:
+    """Each morning, send a Telegram summary of yesterday's habit completion.
+
+    Controlled by ``telegram_habit_summary_enabled`` (default true),
+    ``telegram_habit_summary_hour`` (default 7), ``telegram_habit_summary_minute``
+    (default 0). Silently skipped if yesterday's Daily Note doesn't exist
+    or contains no ``#habit`` lines.
+    """
+    if not config.get("telegram_habit_summary_enabled", True):
+        logger.info("Telegram habit summary disabled")
+        return
+
+    hour = int(config.get("telegram_habit_summary_hour", 7))
+    minute = int(config.get("telegram_habit_summary_minute", 0))
+    logger.info(
+        "Telegram habit summary loop started (%02d:%02d daily)",
+        hour, minute,
+    )
+
+    while True:
+        try:
+            now = datetime.now()
+            target = now.replace(
+                hour=hour, minute=minute, second=0, microsecond=0,
+            )
+            if target <= now:
+                target += timedelta(days=1)
+            await asyncio.sleep(max(1.0, (target - now).total_seconds()))
+
+            daily_notes_dir = config.get(
+                "obsidian_daily_notes_dir", bt_tasks.DEFAULT_DAILY_NOTES_DIR,
+            )
+            yesterday = datetime.now().date() - timedelta(days=1)
+            result = bt_tasks.summarize_habits(
+                daily_notes_dir, for_date=yesterday,
+            )
+            if result is None:
+                logger.info(
+                    "No Daily Note for %s — skipping habit summary", yesterday,
+                )
+                continue
+            total, completed, incomplete = result
+            if total == 0:
+                logger.info(
+                    "Daily Note for %s has no habits — skipping summary",
+                    yesterday,
+                )
+                continue
+
+            msg = await _generate_habit_summary_message(
+                total, completed, incomplete, config,
+            )
+            await bt_telegram.send_message(msg)
+            logger.info(
+                "Sent telegram habit summary for %s: %d/%d completed",
+                yesterday, completed, total,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Telegram habit summary loop iteration failed")
+            await asyncio.sleep(60)
+
+
+# ---------------------------------------------------------------------------
 # Proximity-triggered messages
 # ---------------------------------------------------------------------------
 

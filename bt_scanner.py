@@ -663,6 +663,10 @@ class BluetoothRadarScanner:
         asyncio.create_task(
             bt_alexa.run_telegram_habit_reminder_loop(self.config)
         )
+        # Morning Telegram habit summary of yesterday
+        asyncio.create_task(
+            bt_alexa.run_telegram_habit_summary_loop(self.config)
+        )
 
         while True:
             try:
