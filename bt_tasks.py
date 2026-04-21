@@ -1,14 +1,13 @@
 """Obsidian task list readers.
 
-Parses the Master Task List (Obsidian Tasks plugin emoji syntax) into two
-groups:
+Two sources are parsed (Obsidian Tasks plugin emoji syntax):
 
-* **Due today** — uncompleted tasks whose `📅` due date is exactly today,
-  excluding any tagged ``#habit``.
-* **Daily habits** — uncompleted tasks tagged ``#habit``. Items with no
-  date, due today, or overdue are included; items dated strictly in the
-  future are skipped (those are tomorrow's recurrence instance that the
-  Tasks plugin stamps when today's is ticked off).
+* **Due today** — non-habit uncompleted tasks in the Master Task List whose
+  `📅` due date is exactly today. Overdue and undated backlog are excluded.
+* **Daily habits** — uncompleted tasks tagged ``#habit`` in today's Daily
+  Note (one file per day, ``YYYY-MM-DD.md``, generated from the Daily
+  Template by Obsidian's Daily Notes plugin). Each new day gets a fresh
+  note, so we never have to worry about stale/future-dated instances.
 """
 
 from __future__ import annotations
@@ -23,6 +22,7 @@ logger = logging.getLogger("bt_tasks")
 DEFAULT_MASTER_PATH = (
     "/home/nospario/ObsidianVaults/Main/3. Todo Lists/MASTER TASK LIST.md"
 )
+DEFAULT_DAILY_NOTES_DIR = "/home/nospario/ObsidianVaults/Main/1. Journal"
 
 _TASK_LINE_RE = re.compile(r"^\s*-\s*\[(?P<state>[ xX])\]\s*(?P<body>.*)$")
 _DATE_RE = re.compile(r"(\d{4}-\d{2}-\d{2})")
@@ -128,30 +128,128 @@ def get_todays_outstanding_tasks(
     return tasks[:max_tasks]
 
 
+def _todays_daily_note(dir_path: str | Path, today: date) -> Path:
+    """Path to today's Daily Note (``<dir>/YYYY-MM-DD.md``)."""
+    return Path(dir_path) / f"{today.isoformat()}.md"
+
+
 def get_daily_recurring_tasks(
-    path: str | Path = DEFAULT_MASTER_PATH,
+    daily_notes_dir: str | Path = DEFAULT_DAILY_NOTES_DIR,
     *,
     today: date | None = None,
     max_tasks: int = 15,
 ) -> list[str]:
-    """Return uncompleted ``#habit``-tagged tasks from the master list.
+    """Return uncompleted ``#habit``-tagged tasks from today's Daily Note.
 
-    Items with no date, due today, or overdue are all included. Items
-    dated strictly in the future are skipped — the Obsidian Tasks plugin
-    stamps tomorrow's recurrence when today's is ticked off, and we don't
-    want that instance read back as still outstanding today.
+    Returns an empty list if the note hasn't been created yet (Obsidian's
+    Daily Notes plugin creates it on first open each day).
     """
     today = today or date.today()
+    path = _todays_daily_note(daily_notes_dir, today)
     tasks: list[str] = []
-    for done, body in _read_task_lines(Path(path)):
+    for done, body in _read_task_lines(path):
         if done:
             continue
         if not _has_habit_tag(body):
-            continue
-        due = _extract_date_after(body, _DUE_EMOJI)
-        if due is not None and due > today:
             continue
         desc = _clean_description(body)
         if desc:
             tasks.append(desc)
     return tasks[:max_tasks]
+
+
+def complete_todays_habits(
+    daily_notes_dir: str | Path = DEFAULT_DAILY_NOTES_DIR,
+    *,
+    today: date | None = None,
+) -> int:
+    """Mark today's uncompleted ``#habit`` tasks complete in the Daily Note.
+
+    For each uncompleted ``- [ ]`` line tagged ``#habit`` the state is
+    flipped to ``- [x]`` and ``✅ YYYY-MM-DD`` is appended (standard Tasks
+    plugin format, skipped if already present). Tomorrow's Daily Note is
+    created fresh from the Daily Template by the Daily Notes plugin, so we
+    don't need to stamp a new instance here. Idempotent — completed lines
+    are left alone. Returns the number of habit lines completed.
+    """
+    today = today or date.today()
+    path = _todays_daily_note(daily_notes_dir, today)
+    if not path.exists():
+        logger.info("Daily note not found: %s", path)
+        return 0
+
+    try:
+        original = path.read_text(encoding="utf-8")
+    except Exception:
+        logger.exception("Failed to read %s", path)
+        return 0
+
+    # splitlines(keepends=True) preserves \n / \r\n so we can reassemble
+    # the file without changing line endings or the trailing newline state.
+    lines = original.splitlines(keepends=True)
+    new_lines: list[str] = []
+    completed = 0
+
+    for line in lines:
+        stripped = line.rstrip("\r\n")
+        ending = line[len(stripped):]
+        m = _TASK_LINE_RE.match(stripped)
+        if not m or m.group("state").lower() == "x":
+            new_lines.append(line)
+            continue
+        body = m.group("body")
+        if not _has_habit_tag(body):
+            new_lines.append(line)
+            continue
+
+        # Everything before the `[ ]` marker (indent + `- `)
+        marker_idx = stripped.index("[ ]")
+        prefix = stripped[:marker_idx]
+        completed_body = body
+        if _DONE_EMOJI not in completed_body:
+            completed_body = completed_body.rstrip() + f" {_DONE_EMOJI} {today.isoformat()}"
+        new_lines.append(f"{prefix}[x] {completed_body}{ending}")
+        completed += 1
+
+    if completed == 0:
+        return 0
+
+    # Atomic replace via temp file in the same directory
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text("".join(new_lines), encoding="utf-8")
+    tmp.replace(path)
+    logger.info("Completed %d habit task(s) in %s", completed, path)
+    return completed
+
+
+def _cli() -> int:
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Obsidian task utilities")
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    p_complete = sub.add_parser(
+        "complete-habits",
+        help="Mark today's uncompleted #habit tasks in the Daily Note as complete.",
+    )
+    p_complete.add_argument(
+        "--daily-notes-dir", default=DEFAULT_DAILY_NOTES_DIR,
+        help="Daily Notes directory (default: %(default)s)",
+    )
+
+    args = parser.parse_args()
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
+    if args.cmd == "complete-habits":
+        count = complete_todays_habits(args.daily_notes_dir)
+        print(f"Completed {count} habit task(s)")
+        return 0
+    return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(_cli())

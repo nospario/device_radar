@@ -272,10 +272,12 @@ Requires a tool-calling-capable Ollama model (e.g. `llama3.2:3b`). Models that d
 
 Per-Echo toggle that speaks a reminder of today's outstanding Obsidian tasks on a configurable interval. Module: `bt_tasks.py`; loop in `bt_alexa.run_task_reminder_loop()`.
 
-Both groups are read from the **Master Task List** — default `/home/nospario/ObsidianVaults/Main/3. Todo Lists/MASTER TASK LIST.md`, overridable via `obsidian_master_task_path`. The parser splits its uncompleted `- [ ]` lines into two groups by hashtag:
+Two files are read each cycle:
 
-* **Due today** — tasks **without** the `#habit` tag whose `📅` due date is **exactly today**. Overdue items and undated backlog are deliberately excluded so the reminder reflects today's commitments, not the whole backlog.
-* **Daily habits** — tasks tagged `#habit` (matched as a whole word, case-insensitive). Items with no date, due today, or overdue are all included. Items dated strictly in the future are skipped — when the Obsidian Tasks plugin recurrence fires it creates a new `- [ ]` entry dated for the next occurrence, so filtering out future-dated instances prevents tomorrow's recurrence from being read back as still outstanding today.
+* **Due today** — read from the **Master Task List** (default `/home/nospario/ObsidianVaults/Main/3. Todo Lists/MASTER TASK LIST.md`, overridable via `obsidian_master_task_path`). Only uncompleted tasks **without** the `#habit` tag whose `📅` due date is **exactly today** are included. Overdue items and undated backlog are deliberately excluded.
+* **Daily habits** — read from **today's Daily Note** in `obsidian_daily_notes_dir` (default `/home/nospario/ObsidianVaults/Main/1. Journal`, filename `YYYY-MM-DD.md`). Obsidian's Daily Notes plugin creates the note from the Daily Template each day; the template contains the `#habit`-tagged tasks. Every uncompleted `- [ ]` line tagged `#habit` (matched as a whole word, case-insensitive) is a habit reminder. If the note hasn't been created yet, the habits list is empty and habit reminders skip that cycle.
+
+A separate cron (`bt_tasks.py complete-habits`) runs at 23:55 each day to mark any still-unchecked `#habit` lines in today's Daily Note as `- [x]` with `✅ YYYY-MM-DD`, so forgotten habits don't show as overdue tomorrow. Tomorrow's note is generated fresh from the template by Obsidian, so we don't need to stamp new instances.
 
 The parser recognises Obsidian Tasks plugin emoji syntax: `- [ ]`/`- [x]` state, `📅` due, `⏳` scheduled, `🛫` start, `✅` done, `🔁` recurrence, plus priority markers. Wikilinks, `#tags` and all of those emojis are stripped before the description is spoken. Missing files are logged and treated as empty lists — so it's safe to configure a path before the note has synced from Obsidian.
 

@@ -691,8 +691,11 @@ async def run_task_reminder_loop(config: dict[str, Any], db_path: Path) -> None:
             master_path = config.get(
                 "obsidian_master_task_path", bt_tasks.DEFAULT_MASTER_PATH,
             )
+            daily_notes_dir = config.get(
+                "obsidian_daily_notes_dir", bt_tasks.DEFAULT_DAILY_NOTES_DIR,
+            )
             due_today = bt_tasks.get_todays_outstanding_tasks(master_path)
-            daily = bt_tasks.get_daily_recurring_tasks(master_path)
+            daily = bt_tasks.get_daily_recurring_tasks(daily_notes_dir)
 
             if not due_today and not daily:
                 logger.debug("No outstanding tasks for today — skipping reminders")
