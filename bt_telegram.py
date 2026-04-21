@@ -17,6 +17,7 @@ import httpx
 
 import bt_db
 import bt_search
+import bt_tasks
 
 logger = logging.getLogger("bt_telegram")
 
@@ -79,9 +80,16 @@ def get_telegram_credentials(config: dict[str, Any] | None = None) -> tuple[str,
 # Notification sender (standalone — used by bt_scanner.py)
 # ---------------------------------------------------------------------------
 
-async def send_message(text: str, parse_mode: str = "HTML") -> bool:
+async def send_message(
+    text: str,
+    parse_mode: str = "HTML",
+    reply_markup: dict | None = None,
+) -> bool:
     """Send a free-form message to the configured Telegram chat.
 
+    ``reply_markup`` should be a JSON-serialisable dict (e.g.
+    ``{"inline_keyboard": [[{"text": "X", "callback_data": "y"}]]}``);
+    Telegram expects it as a JSON-encoded string inside the request body.
     Returns True if the API accepted it. Safe to call without the full bot
     running — only requires httpx.
     """
@@ -89,7 +97,12 @@ async def send_message(text: str, parse_mode: str = "HTML") -> bool:
     if not token or not chat_id:
         return False
 
-    payload = {"chat_id": chat_id, "text": text, "parse_mode": parse_mode}
+    payload: dict[str, Any] = {
+        "chat_id": chat_id, "text": text, "parse_mode": parse_mode,
+    }
+    if reply_markup is not None:
+        payload["reply_markup"] = json.dumps(reply_markup)
+
     try:
         async with httpx.AsyncClient() as client:
             resp = await client.post(
@@ -282,9 +295,12 @@ async def answer_presence(
 # ---------------------------------------------------------------------------
 
 try:
-    from telegram import Update
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
     from telegram.constants import ChatAction
-    from telegram.ext import Application, CommandHandler, MessageHandler, filters
+    from telegram.ext import (
+        Application, CallbackQueryHandler, CommandHandler, MessageHandler,
+        filters,
+    )
 
     _HAS_TELEGRAM_LIB = True
 except ImportError:
@@ -593,6 +609,88 @@ async def _cmd_today(update, context) -> None:
         await update.message.reply_text(text)
     finally:
         conn.close()
+
+
+def _habits_daily_notes_dir() -> str:
+    return load_config().get(
+        "obsidian_daily_notes_dir", bt_tasks.DEFAULT_DAILY_NOTES_DIR,
+    )
+
+
+def _build_habit_keyboard(habits: list[str]) -> "InlineKeyboardMarkup | None":
+    """Build a vertical inline keyboard — one tappable button per habit."""
+    if not habits:
+        return None
+    rows = [
+        [InlineKeyboardButton(
+            h, callback_data=f"habit:{bt_tasks.habit_hash(h)}",
+        )]
+        for h in habits
+    ]
+    return InlineKeyboardMarkup(rows)
+
+
+def _render_habit_message(habits: list[str]) -> str:
+    if not habits:
+        return "<b>All habits complete for today.</b>"
+    lines = [f"<b>Outstanding habits ({len(habits)})</b>"]
+    lines.extend(f"• {html.escape(h)}" for h in habits)
+    return "\n".join(lines)
+
+
+async def _cmd_habits(update, context) -> None:
+    """Handle /habits — list today's outstanding #habit items with tap-to-complete buttons."""
+    if not _is_authorized(update.effective_chat.id):
+        return
+    habits = bt_tasks.get_daily_recurring_tasks(_habits_daily_notes_dir())
+    await update.message.reply_text(
+        _render_habit_message(habits),
+        parse_mode="HTML",
+        reply_markup=_build_habit_keyboard(habits),
+    )
+
+
+async def _on_habit_callback(update, context) -> None:
+    """Handle a habit-button tap: mark complete, refresh the message in place."""
+    query = update.callback_query
+    if not _is_authorized(query.from_user.id if query.from_user else 0) and not _is_authorized(
+        query.message.chat.id if query.message else 0,
+    ):
+        await query.answer()
+        return
+
+    await query.answer()  # dismiss the loading spinner
+
+    data = query.data or ""
+    if not data.startswith("habit:"):
+        return
+    target_hash = data.split(":", 1)[1]
+
+    daily_notes_dir = _habits_daily_notes_dir()
+    current = bt_tasks.get_daily_recurring_tasks(daily_notes_dir)
+    matched = next(
+        (h for h in current if bt_tasks.habit_hash(h) == target_hash), None,
+    )
+
+    if matched is None:
+        # Already completed (possibly from Obsidian or another tap); just refresh.
+        remaining = current
+    elif bt_tasks.complete_habit_by_name(
+        daily_notes_dir, description=matched,
+    ):
+        remaining = bt_tasks.get_daily_recurring_tasks(daily_notes_dir)
+    else:
+        remaining = current  # write failed — show current state unchanged
+
+    try:
+        await query.edit_message_text(
+            _render_habit_message(remaining),
+            parse_mode="HTML",
+            reply_markup=_build_habit_keyboard(remaining),
+        )
+    except Exception as e:
+        # Most common: "message is not modified" when nothing changed
+        logger.debug("Habit message edit skipped: %s", e)
 
 
 async def _cmd_notify_toggle(update, context) -> None:
@@ -1022,6 +1120,8 @@ def main() -> None:
     app.add_handler(CommandHandler("say", _cmd_say))
     app.add_handler(CommandHandler("echoes", _cmd_echoes))
     app.add_handler(CommandHandler("readaloud", _cmd_readaloud))
+    app.add_handler(CommandHandler("habits", _cmd_habits))
+    app.add_handler(CallbackQueryHandler(_on_habit_callback, pattern=r"^habit:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, _handle_message))
 
     # Register bot commands with Telegram so they appear in the / menu
@@ -1042,10 +1142,11 @@ def main() -> None:
             BotCommand("say", "Speak a message on an Echo device"),
             BotCommand("echoes", "List available Echo devices"),
             BotCommand("readaloud", "Toggle Alexa read-aloud for chat"),
+            BotCommand("habits", "List outstanding habits (tap to complete)"),
         ])
 
     app.post_init = _post_init
-    app.run_polling(allowed_updates=["message"])
+    app.run_polling(allowed_updates=["message", "callback_query"])
 
 
 if __name__ == "__main__":

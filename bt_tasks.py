@@ -12,6 +12,7 @@ Two sources are parsed (Obsidian Tasks plugin emoji syntax):
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 from datetime import date
@@ -251,6 +252,82 @@ def complete_todays_habits(
     tmp.replace(path)
     logger.info("Completed %d habit task(s) in %s", completed, path)
     return completed
+
+
+def habit_hash(description: str) -> str:
+    """Stable short hash of a habit description, for Telegram callback_data.
+
+    Returns the first 16 hex chars of sha256 — short enough to fit inside
+    the 64-byte callback_data limit when prefixed, and stable across
+    processes so bt-scanner (sender) and bt-telegram (receiver) agree
+    without sharing state.
+    """
+    return hashlib.sha256(description.encode("utf-8")).hexdigest()[:16]
+
+
+def complete_habit_by_name(
+    daily_notes_dir: str | Path = DEFAULT_DAILY_NOTES_DIR,
+    *,
+    description: str,
+    today: date | None = None,
+) -> bool:
+    """Mark a single uncompleted ``#habit`` line matching ``description``
+    complete in today's Daily Note.
+
+    Match is against the cleaned description (the text shown in the bot's
+    button). Returns True if a line was updated. First match wins if there
+    are duplicates.
+    """
+    today = today or date.today()
+    path = _todays_daily_note(daily_notes_dir, today)
+    if not path.exists():
+        logger.info("Daily note not found: %s", path)
+        return False
+
+    try:
+        original = path.read_text(encoding="utf-8")
+    except Exception:
+        logger.exception("Failed to read %s", path)
+        return False
+
+    lines = original.splitlines(keepends=True)
+    new_lines: list[str] = []
+    done = False
+
+    for line in lines:
+        if done:
+            new_lines.append(line)
+            continue
+        stripped = line.rstrip("\r\n")
+        ending = line[len(stripped):]
+        m = _TASK_LINE_RE.match(stripped)
+        if not m or m.group("state").lower() == "x":
+            new_lines.append(line)
+            continue
+        body = m.group("body")
+        if not _has_habit_tag(body):
+            new_lines.append(line)
+            continue
+        if _clean_description(body) != description:
+            new_lines.append(line)
+            continue
+
+        marker_idx = stripped.index("[ ]")
+        prefix = stripped[:marker_idx]
+        completed_body = body
+        if _DONE_EMOJI not in completed_body:
+            completed_body = completed_body.rstrip() + f" {_DONE_EMOJI} {today.isoformat()}"
+        new_lines.append(f"{prefix}[x] {completed_body}{ending}")
+        done = True
+
+    if not done:
+        return False
+
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text("".join(new_lines), encoding="utf-8")
+    tmp.replace(path)
+    logger.info("Completed habit %r in %s", description, path)
+    return True
 
 
 def _cli() -> int:

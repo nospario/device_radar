@@ -824,7 +824,15 @@ async def run_telegram_habit_reminder_loop(config: dict[str, Any]) -> None:
 
             lines = [f"<b>Outstanding habits ({len(habits)})</b>"]
             lines.extend(f"• {html.escape(h)}" for h in habits)
-            await bt_telegram.send_message("\n".join(lines))
+            keyboard = {
+                "inline_keyboard": [
+                    [{"text": h, "callback_data": f"habit:{bt_tasks.habit_hash(h)}"}]
+                    for h in habits
+                ],
+            }
+            await bt_telegram.send_message(
+                "\n".join(lines), reply_markup=keyboard,
+            )
             logger.info(
                 "Sent telegram habit reminder: %d outstanding habit(s)",
                 len(habits),
