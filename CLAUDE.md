@@ -35,7 +35,7 @@ Supporting modules:
 | `bt_news.py` | BBC News RSS headline fetching, per-device read tracking, and spoken suffix formatting for Alexa TTS |
 | `bt_search.py` | Ollama chat with web search — tool-calling agent loop using Ollama's `/api/chat` endpoint with `web_search` and `web_fetch` cloud tools; provides sync and async entry points for the web assistant and Telegram bot |
 
-**Kitkat** (personal memory agent) has been decoupled into a standalone application at `/opt/kitkat/` with its own FastAPI server on port 8081, own Telegram bot, and sqlite-vec/FTS5 storage. The Device Radar nav bar links to it externally. Development copy at `/var/www/kitkat/`. No git repo — deployed via `deploy.sh` (rsync + service restart).
+**Kitkat** (personal memory agent) has been decoupled into a standalone application at `/opt/kitkat/` with its own FastAPI server on port 8081, own Telegram bot, and sqlite-vec/FTS5 storage. The Device Radar nav bar links to it externally. Development copy at `/var/www/kitkat/`. No git repo — deployed via `deploy.sh` (rsync + service restart). Services run as a dedicated `kitkat` system user (not root); Obsidian vault access via ACL.
 
 ### Kitkat Memory & Profile System
 
@@ -62,6 +62,10 @@ Kitkat runs on CPU-only Ollama (no GPU) so prompt size and model choice are crit
 - **RAG chunks**: `max_context_chunks: 3` (was 5) — less context to process
 - **Ollama config**: `OLLAMA_MAX_LOADED_MODELS=3` in systemd override — keeps chat model + embedding model resident simultaneously, avoids ~20s model reload thrashing
 - **Data storage**: External USB drive at `/mnt/external/kitkat` — prone to I/O errors; check `dmesg` and `ls /mnt/external/` first if Kitkat breaks
+- **Indexer startup**: `kitkat-indexer.service` has `After=ollama.service` and a readiness check (`_wait_for_ollama`) to avoid indexing files with zero-vector embeddings before Ollama is ready
+- **Calendar indexing**: Hash-based change detection skips re-embedding when events are unchanged — saves ~480 embedding calls/day
+- **Embedding safety**: `embed_texts()` raises `httpx.ConnectError` instead of returning zero vectors when Ollama is unreachable — prevents corrupted embeddings from being persisted
+- **GDrive indexing**: Currently disabled (`gdrive_path: ""` in config) — no rclone mount configured
 
 ## Database
 
