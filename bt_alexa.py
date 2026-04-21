@@ -5,11 +5,12 @@ Ollama and speaks them through an Amazon Echo using alexa_remote_control.sh."""
 from __future__ import annotations
 
 import asyncio
+import html
 import json
 import logging
 import re
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +20,7 @@ import bt_calendar
 import bt_db
 import bt_news
 import bt_tasks
+import bt_telegram
 import bt_weather
 
 logger = logging.getLogger("bt_alexa")
@@ -775,6 +777,64 @@ async def run_task_reminder_loop(config: dict[str, Any], db_path: Path) -> None:
 
         except Exception:
             logger.error("Error in task reminder loop", exc_info=True)
+
+
+# ---------------------------------------------------------------------------
+# Hourly Telegram habit reminders
+# ---------------------------------------------------------------------------
+
+async def run_telegram_habit_reminder_loop(config: dict[str, Any]) -> None:
+    """Send a Telegram message on the hour listing outstanding daily habits.
+
+    Runs from ``telegram_habit_start_hour`` to ``telegram_habit_end_hour``
+    (inclusive, default 8 to 22). Reads habits from today's Daily Note via
+    :func:`bt_tasks.get_daily_recurring_tasks` and skips entirely when the
+    list is empty.
+    """
+    if not config.get("telegram_habit_reminders_enabled", True):
+        logger.info("Telegram habit reminders disabled")
+        return
+
+    start_hour = int(config.get("telegram_habit_start_hour", 8))
+    end_hour = int(config.get("telegram_habit_end_hour", 22))
+    logger.info(
+        "Telegram habit reminder loop started (%02d:00 to %02d:00)",
+        start_hour, end_hour,
+    )
+
+    while True:
+        try:
+            now = datetime.now()
+            next_hour = (now + timedelta(hours=1)).replace(
+                minute=0, second=0, microsecond=0,
+            )
+            await asyncio.sleep(max(1.0, (next_hour - now).total_seconds()))
+
+            hour = datetime.now().hour
+            if hour < start_hour or hour > end_hour:
+                continue
+
+            daily_notes_dir = config.get(
+                "obsidian_daily_notes_dir", bt_tasks.DEFAULT_DAILY_NOTES_DIR,
+            )
+            habits = bt_tasks.get_daily_recurring_tasks(daily_notes_dir)
+            if not habits:
+                logger.info("No outstanding habits — skipping telegram reminder")
+                continue
+
+            lines = [f"<b>Outstanding habits ({len(habits)})</b>"]
+            lines.extend(f"• {html.escape(h)}" for h in habits)
+            await bt_telegram.send_message("\n".join(lines))
+            logger.info(
+                "Sent telegram habit reminder: %d outstanding habit(s)",
+                len(habits),
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Telegram habit reminder loop iteration failed")
+            # Back off briefly so a persistent failure doesn't hot-loop
+            await asyncio.sleep(60)
 
 
 # ---------------------------------------------------------------------------

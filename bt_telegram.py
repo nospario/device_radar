@@ -79,31 +79,40 @@ def get_telegram_credentials(config: dict[str, Any] | None = None) -> tuple[str,
 # Notification sender (standalone — used by bt_scanner.py)
 # ---------------------------------------------------------------------------
 
+async def send_message(text: str, parse_mode: str = "HTML") -> bool:
+    """Send a free-form message to the configured Telegram chat.
+
+    Returns True if the API accepted it. Safe to call without the full bot
+    running — only requires httpx.
+    """
+    token, chat_id = get_telegram_credentials()
+    if not token or not chat_id:
+        return False
+
+    payload = {"chat_id": chat_id, "text": text, "parse_mode": parse_mode}
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                f"https://api.telegram.org/bot{token}/sendMessage",
+                json=payload, timeout=10,
+            )
+            return resp.status_code == 200
+    except Exception as e:
+        logger.error("Telegram send_message failed: %s", e)
+        return False
+
+
 async def send_notification(device_name: str, event: str) -> None:
     """Send an arrival/departure notification to Telegram.
 
     Can be called from bt_scanner.py without the full bot running.
-    Only requires httpx (no python-telegram-bot dependency).
     """
-    token, chat_id = get_telegram_credentials()
-    if not token or not chat_id:
-        return
-
     escaped = html.escape(device_name)
     if event == "arrived":
         text = f"\U0001f4e1 <b>{escaped}</b> detected"
     else:
         text = f"\U0001f44b <b>{escaped}</b> departed"
-
-    payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
-    try:
-        async with httpx.AsyncClient() as client:
-            await client.post(
-                f"https://api.telegram.org/bot{token}/sendMessage",
-                json=payload, timeout=10,
-            )
-    except Exception as e:
-        logger.error("Telegram notification failed: %s", e)
+    await send_message(text)
 
 
 # ---------------------------------------------------------------------------

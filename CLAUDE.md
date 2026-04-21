@@ -279,6 +279,10 @@ Two files are read each cycle:
 
 A separate cron (`bt_tasks.py complete-habits`) runs at 23:55 each day to mark any still-unchecked `#habit` lines in today's Daily Note as `- [x]` with `✅ YYYY-MM-DD`, so forgotten habits don't show as overdue tomorrow. Tomorrow's note is generated fresh from the template by Obsidian, so we don't need to stamp new instances.
 
+A separate `bt_alexa.run_telegram_habit_reminder_loop()` (spawned by the scanner, independent of `alexa_enabled`) sends a Telegram message on the hour listing outstanding habits. Controlled by `telegram_habit_reminders_enabled` (default true), `telegram_habit_start_hour` (default 8), `telegram_habit_end_hour` (default 22). Skipped on the hour if no habits remain outstanding.
+
+Each Alexa bundle re-reads the current task state just before generating its message and drops items that have been completed (in Obsidian) since the cycle started; fully-empty bundles are skipped so the user never hears about a habit they've just ticked off.
+
 The parser recognises Obsidian Tasks plugin emoji syntax: `- [ ]`/`- [x]` state, `📅` due, `⏳` scheduled, `🛫` start, `✅` done, `🔁` recurrence, plus priority markers. Wikilinks, `#tags` and all of those emojis are stripped before the description is spoken. Missing files are logged and treated as empty lists — so it's safe to configure a path before the note has synced from Obsidian.
 
 Echo-device fields in `echo_devices`: `tasks_enabled`, `tasks_interval` (minutes, default 120), `last_tasks_message`. Configured via the Alexa page (`/alexa`) alongside Encourage Mode.
