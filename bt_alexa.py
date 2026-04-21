@@ -724,8 +724,32 @@ async def run_task_reminder_loop(config: dict[str, Any], db_path: Path) -> None:
             )
 
             for i, bundle in enumerate(bundles):
+                # Re-check current outstanding tasks so anything ticked off
+                # mid-cycle (in Obsidian) doesn't still get announced.
+                current_due = set(bt_tasks.get_todays_outstanding_tasks(master_path))
+                current_daily = set(bt_tasks.get_daily_recurring_tasks(daily_notes_dir))
+                live_bundle = [
+                    b for b in bundle
+                    if (b["group"] == "due_today" and b["task"] in current_due)
+                    or (b["group"] == "daily" and b["task"] in current_daily)
+                ]
+                if not live_bundle:
+                    logger.info(
+                        "Bundle %d/%d skipped — all tasks completed since cycle started",
+                        i + 1, len(bundles),
+                    )
+                    if i < len(bundles) - 1:
+                        await asyncio.sleep(gap_sec)
+                    continue
+                if len(live_bundle) != len(bundle):
+                    dropped = [b["task"] for b in bundle if b not in live_bundle]
+                    logger.info(
+                        "Bundle %d/%d: dropped %d completed task(s): %s",
+                        i + 1, len(bundles), len(dropped), dropped,
+                    )
+
                 msg = await _generate_bundle_message(
-                    bundle, i + 1, len(bundles), config,
+                    live_bundle, i + 1, len(bundles), config,
                 )
                 for dev in due_devices:
                     device_name = dev["device_name"]
