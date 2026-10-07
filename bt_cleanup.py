@@ -17,9 +17,12 @@ interest in:
 
 A device is *protected* (never hidden or deleted) if a person has shown
 interest in it: it has a friendly name, is watchlisted / notify / paired /
-welcome / proximity / DNS-tracked, has an IP address, is linked to (or from)
-another device, or has calendar / news / Alexa settings. Devices currently
-``DETECTED`` are never touched either. Event history alone does *not*
+welcome / proximity / DNS-tracked, is linked to (or from) another device, or
+has calendar / news / Alexa settings. Devices currently ``DETECTED`` are
+never touched either. A device that only has an IP address (an unnamed WiFi
+device) is not hidden, because hidden devices stay hidden when they come
+back and WiFi devices often go quiet for hours, but it is deleted once it
+has been unseen for the retention period. Event history alone does *not*
 protect a device (early versions logged events for every device); a deleted
 device's events are deleted with it.
 
@@ -133,17 +136,22 @@ def load_settings(config: dict[str, Any]) -> Settings:
 # Selection (SQL)
 # ---------------------------------------------------------------------------
 
-def _protected_sql(conn: sqlite3.Connection) -> str:
-    """SQL condition (alias ``d``) that is true for devices that must be kept."""
+def _protected_sql(conn: sqlite3.Connection, *, keep_visible: bool = False) -> str:
+    """SQL condition (alias ``d``) that is true for devices that must be kept.
+
+    With ``keep_visible`` it also covers devices that should not be *hidden*
+    (anything with an IP address) but may still be deleted when stale.
+    """
     columns = {row[1] for row in conn.execute("PRAGMA table_info(devices)")}
     parts = [
         "COALESCE(d.friendly_name, '') != ''",
-        "COALESCE(d.ip_address, '') != ''",
         "COALESCE(d.linked_to, '') != ''",
         "EXISTS (SELECT 1 FROM devices x WHERE x.linked_to = d.mac_address)",
     ]
     parts += [f"COALESCE(d.{c}, 0) != 0" for c in _FLAG_COLUMNS if c in columns]
     parts += [f"COALESCE(d.{c}, '') NOT IN ('', '[]')" for c in _TEXT_COLUMNS if c in columns]
+    if keep_visible:
+        parts.append("COALESCE(d.ip_address, '') != ''")
     return "(" + " OR ".join(parts) + ")"
 
 
@@ -178,9 +186,10 @@ def _count(conn: sqlite3.Connection, where: str, params: dict[str, Any] | None =
     return int(row[0])
 
 
-def _count_hide(conn: sqlite3.Connection, protected: str, params: dict[str, Any]) -> int:
+def _count_hide(conn: sqlite3.Connection, params: dict[str, Any]) -> int:
     """Devices that would be hidden (excluding ones about to be deleted anyway)."""
-    where = f"{_where_hide(protected)} AND NOT ({_where_delete(protected)})"
+    where = (f"{_where_hide(_protected_sql(conn, keep_visible=True))} "
+             f"AND NOT ({_where_delete(_protected_sql(conn))})")
     return _count(conn, where, params)
 
 
@@ -196,7 +205,7 @@ def preview(conn: sqlite3.Connection, settings: Settings, now: float | None = No
         "hidden": _count(conn, "d.is_hidden = 1"),
         "protected": _count(conn, protected),
         "to_delete": _count(conn, _where_delete(protected), params),
-        "to_hide": _count_hide(conn, protected, params),
+        "to_hide": _count_hide(conn, params),
         "db_bytes": int(page_count * page_size),
     }
 
@@ -207,7 +216,7 @@ def preview(conn: sqlite3.Connection, settings: Settings, now: float | None = No
 
 def hide_stale(conn: sqlite3.Connection, settings: Settings, now: float) -> int:
     """Hide unprotected devices not seen recently. Returns rows changed."""
-    protected = _protected_sql(conn)
+    protected = _protected_sql(conn, keep_visible=True)
     cur = conn.execute(
         "UPDATE devices SET is_hidden = 1 WHERE mac_address IN "
         f"(SELECT d.mac_address FROM devices d WHERE {_where_hide(protected)})",

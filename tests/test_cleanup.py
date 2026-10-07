@@ -112,8 +112,11 @@ class ProtectionTests(CleanupTestCase):
         self.run_cleanup()
         self.assertFalse(self.exists(mac))
 
-    def test_ip_address_protects(self) -> None:
-        self.assert_survives(self.add("BB:00:00:00:01:03", age=self.OLD, ip_address="192.168.1.6"))
+    def test_ip_address_with_a_name_or_flag_still_protects(self) -> None:
+        self.assert_survives(self.add("BB:00:00:00:01:03", age=self.OLD,
+                                      ip_address="192.168.1.6", friendly_name="Laura's MacBook"))
+        self.assert_survives(self.add("BB:00:00:00:01:04", age=self.OLD,
+                                      ip_address="192.168.1.7", is_watchlisted=1))
 
     def test_linked_secondary_and_primary_protect(self) -> None:
         primary = self.add("BB:00:00:00:02:01", age=self.OLD)
@@ -154,6 +157,43 @@ class ProtectionTests(CleanupTestCase):
 
     def test_detected_devices_are_never_touched(self) -> None:
         self.assert_survives(self.add("BB:00:00:00:06:01", age=self.OLD, state="DETECTED"))
+
+
+class UnnamedWifiTests(CleanupTestCase):
+    """An IP address alone keeps a device visible, but not forever."""
+
+    def test_unnamed_ip_device_is_not_hidden_when_quiet_for_hours(self) -> None:
+        mac = self.add("EE:00:00:00:00:01", age=6 * HOUR, lifespan=5 * DAY,
+                       scan_type="WiFi", ip_address="192.168.1.50")
+        result = self.run_cleanup()
+        self.assertTrue(self.exists(mac))
+        self.assertFalse(self.hidden(mac))
+        self.assertEqual(result["hidden"], 0)
+
+    def test_unnamed_ip_device_kept_until_thirty_days_then_deleted(self) -> None:
+        week = self.add("EE:00:00:00:00:02", age=10 * DAY, lifespan=20 * DAY, ip_address="192.168.1.51")
+        month = self.add("EE:00:00:00:00:03", age=31 * DAY, lifespan=20 * DAY, ip_address="192.168.1.52")
+        self.run_cleanup()
+        self.assertTrue(self.exists(week))
+        self.assertFalse(self.hidden(week))
+        self.assertFalse(self.exists(month))
+
+    def test_short_lived_unnamed_ip_device_deleted_after_three_days(self) -> None:
+        mac = self.add("EE:00:00:00:00:04", age=4 * DAY, lifespan=600, ip_address="192.168.1.53")
+        self.run_cleanup()
+        self.assertFalse(self.exists(mac))
+
+    def test_named_ip_device_is_never_deleted(self) -> None:
+        mac = self.add("EE:00:00:00:00:05", age=400 * DAY, ip_address="192.168.1.54",
+                       friendly_name="Wifi Booster")
+        self.run_cleanup()
+        self.assertTrue(self.exists(mac))
+
+    def test_preview_counts_ip_devices_as_deletable_not_hideable(self) -> None:
+        self.add("EE:00:00:00:00:06", age=40 * DAY, lifespan=20 * DAY, ip_address="192.168.1.55")
+        self.add("EE:00:00:00:00:07", age=6 * HOUR, lifespan=20 * DAY, ip_address="192.168.1.56")
+        counts = bt_cleanup.preview(self.conn, self.settings, NOW)
+        self.assertEqual((counts["to_delete"], counts["to_hide"], counts["protected"]), (1, 0, 0))
 
 
 class ModeTests(CleanupTestCase):
