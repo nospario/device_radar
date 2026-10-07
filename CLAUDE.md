@@ -173,7 +173,7 @@ On first run, if `config.json` doesn't exist, a default is created and the scrip
 Flask app on port 8080 with dark theme.
 
 ### Pages
-- **Dashboard** (`/`) — live device list with stats, filters, watchlist/notify toggles, and a Housekeeping panel (stale-record counts and a "Clean up now" button)
+- **Dashboard** (`/`) — live device list with stats, per-column filters (the Name filter also matches IP address and manufacturer), watchlist/notify toggles, and a Housekeeping panel (stale-record counts and a "Clean up now" button)
 - **Device Detail** (`/device/<mac>`) — info, settings (including Alexa voice selection), linking, event history, proximity Alexa config (BLE devices only), calendar selection, BBC News feed selection (all devices)
 - **History** (`/history`) — filterable paginated event log
 - **Pairing** (`/pairing`) — pair/unpair via web UI
@@ -337,7 +337,7 @@ Three services:
 - Dataclasses for structured data where appropriate
 - No global mutable state — encapsulate in classes or module-level caches
 - Single-file modules (each service is one .py file)
-- Tests live in `tests/` (stdlib `unittest`, temp databases); run `python3 -m unittest discover -s tests -v` before deploying (cleanup logic, schema, and web page/endpoint smoke tests; tests must never read the real `config.json` or touch the network)
+- Tests live in `tests/` (stdlib `unittest`, temp databases; `test_dashboard_js.py` runs dashboard JS helpers through node); run `python3 -m unittest discover -s tests -v` before deploying (cleanup logic, schema, and web page/endpoint smoke tests; tests must never read the real `config.json` or touch the network)
 
 ## Dependencies
 

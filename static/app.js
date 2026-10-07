@@ -88,10 +88,17 @@ function getColumnFilters() {
     };
 }
 
+// Text the Name filter searches: the displayed name plus IP address and
+// manufacturer, so a device can be found by "192.168.1.158" or "tp-link".
+function nameSearchText(d) {
+    return [d.friendly_name || d.advertised_name || '(unknown)', d.ip_address, d.manufacturer]
+        .filter(Boolean).join(' ').toLowerCase();
+}
+
 function applyColumnFilters(devices) {
     const f = getColumnFilters();
     return devices.filter(d => {
-        const name = (d.friendly_name || d.advertised_name || '(unknown)').toLowerCase();
+        const name = nameSearchText(d);
         const mac = (d.mac_address || '').toLowerCase();
         const type = (d.device_type || '').toLowerCase();
         const scan = d.scan_type || '';
