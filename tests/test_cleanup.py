@@ -149,12 +149,6 @@ class ProtectionTests(CleanupTestCase):
         self.run_cleanup()
         self.assertFalse(self.exists(mac))
 
-    def test_dns_tracking_column_protects_when_present(self) -> None:
-        # Present in some deployed databases but not defined in init_db.
-        self.conn.execute("ALTER TABLE devices ADD COLUMN dns_tracking_enabled INTEGER DEFAULT 0")
-        mac = self.add("BB:00:00:00:05:01", age=self.OLD, dns_tracking_enabled=1)
-        self.assert_survives(mac)
-
     def test_detected_devices_are_never_touched(self) -> None:
         self.assert_survives(self.add("BB:00:00:00:06:01", age=self.OLD, state="DETECTED"))
 

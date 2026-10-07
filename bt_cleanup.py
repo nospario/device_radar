@@ -17,7 +17,7 @@ interest in:
 
 A device is *protected* (never hidden or deleted) if a person has shown
 interest in it: it has a friendly name, is watchlisted / notify / paired /
-welcome / proximity / DNS-tracked, is linked to (or from) another device, or
+welcome / proximity, is linked to (or from) another device, or
 has calendar / news / Alexa settings. Devices currently ``DETECTED`` are
 never touched either. A device that only has an IP address (an unnamed WiFi
 device) is not hidden, because hidden devices stay hidden when they come
@@ -60,7 +60,7 @@ _VACUUM_MIN_DELETED = 1000
 # because not every database has every column.
 _FLAG_COLUMNS = (
     "is_watchlisted", "is_notify", "is_paired", "is_welcome",
-    "proximity_enabled", "dns_tracking_enabled",
+    "proximity_enabled",
 )
 _TEXT_COLUMNS = (
     "calendar_calendars", "news_feeds", "alexa_voice",
