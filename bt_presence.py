@@ -644,6 +644,25 @@ class PersonData:
     quality: dict[str, Any] = field(default_factory=dict)
 
 
+def ignore_before(config: dict[str, Any], person: str, tz: tzinfo | None = None) -> float | None:
+    """Start of the history to use for ``person``, from ``presence_ignore_before`` ({"richard": "2026-10-07"}).
+
+    Lets you discard a period you know was bad (e.g. a Bluetooth-only phone that flickered) so the
+    reports and predictions start again from clean data. Events before that date stay in the
+    database; they are only left out of the analysis. Unknown names and unreadable dates are ignored.
+    """
+    raw = config.get("presence_ignore_before")
+    if not isinstance(raw, dict):
+        return None
+    for name, value in raw.items():
+        if bt_people.normalise_person(name) == person:
+            try:
+                return _midnight_ts(date.fromisoformat(str(value)), tz)
+            except ValueError:
+                logger.warning("presence_ignore_before for %s is not a YYYY-MM-DD date: %r", person, value)
+    return None
+
+
 def _signal(devices: list[dict[str, Any]]) -> str:
     kinds = {("WiFi" if "wifi" in (d.get("scan_type") or "").lower() else "Bluetooth") for d in devices}
     return "WiFi + Bluetooth" if len(kinds) == 2 else (kinds.pop() if kinds else "none")
@@ -689,15 +708,17 @@ def analyse(conn: sqlite3.Connection, config: dict[str, Any], now: float | None 
         marks = ",".join("?" * len(macs))
         count, newest = conn.execute(
             f"SELECT COUNT(*), COALESCE(MAX(id), 0) FROM events WHERE mac_address IN ({marks})", macs).fetchone()[:2]
+        cutoff = ignore_before(config, person, tz)
         key = (db, person, tuple(macs), count, newest, tuple(all_gaps), settings.flap_minutes,
-               settings.flap_minutes_bluetooth, settings.min_outing_minutes, int(now // 3600))
+               settings.flap_minutes_bluetooth, settings.min_outing_minutes, int(now // 3600), cutoff)
         with _cache_lock:
             cached = _session_cache.get(key)
         if cached:
             signal, raw, sessions, outings = cached
         else:
             events = [(r[0], r[1], r[2]) for r in conn.execute(
-                f"SELECT mac_address, event_type, timestamp FROM events WHERE mac_address IN ({marks})", macs)]
+                f"SELECT mac_address, event_type, timestamp FROM events WHERE mac_address IN ({marks}) AND timestamp >= ?",
+                [*macs, cutoff or 0])]
             signal = _signal(devices)
             flap = (settings.flap_minutes_bluetooth if "Bluetooth" in signal else settings.flap_minutes) * 60
             sessions = build_sessions(events, all_gaps, flap, now)

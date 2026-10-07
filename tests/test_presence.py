@@ -27,6 +27,10 @@ def ts(y, mo, d, h=0, mi=0) -> float:
 NOW = ts(2026, 10, 7, 10, 0)           # a Wednesday morning
 
 
+def tp_ts(*a) -> float:
+    return ts(*a)
+
+
 def out(leave, back) -> bp.Outing:
     return bp.Outing(leave, back)
 
@@ -728,6 +732,36 @@ class EngineTests(unittest.TestCase):
         theirs = bp.analyse(other, {}, NOW, TZ)["cy"]
         self.assertGreater(len(mine.outings), 10)
         self.assertEqual(len(theirs.outings), 0)
+
+    def test_history_before_the_ignore_date_is_left_out_but_kept_in_the_database(self) -> None:
+        self.phone("AA:00:00:00:00:08", "Ed's iPhone")
+        self.events("AA:00:00:00:00:08", weekday_outings(80))
+        everything = bp.analyse(self.conn, {}, NOW, TZ)["ed"]
+        cfg = {"presence_ignore_before": {"Ed": "2026-09-01"}}
+        recent = bp.analyse(self.conn, cfg, NOW, TZ)["ed"]
+        self.assertLess(len(recent.outings), len(everything.outings))
+        self.assertGreater(len(recent.outings), 5)
+        self.assertGreaterEqual(min(o.leave for o in recent.outings), tp_ts(2026, 9, 1))
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM events").fetchone()[0], 1 + 2 * len(weekday_outings(80)))
+
+    def test_changing_the_ignore_date_is_not_masked_by_the_cache(self) -> None:
+        self.phone("AA:00:00:00:00:0A", "Flo's iPhone")
+        self.events("AA:00:00:00:00:0A", weekday_outings(80))
+        a = len(bp.analyse(self.conn, {"presence_ignore_before": {"flo": "2026-08-01"}}, NOW, TZ)["flo"].outings)
+        b = len(bp.analyse(self.conn, {"presence_ignore_before": {"flo": "2026-09-20"}}, NOW, TZ)["flo"].outings)
+        c = len(bp.analyse(self.conn, {}, NOW, TZ)["flo"].outings)
+        self.assertGreater(a, b)
+        self.assertGreater(c, a)
+
+    def test_ignore_date_only_affects_the_named_person_and_bad_values_are_ignored(self) -> None:
+        self.phone("AA:00:00:00:00:0B", "Gus's iPhone")
+        self.events("AA:00:00:00:00:0B", weekday_outings(60))
+        full = len(bp.analyse(self.conn, {}, NOW, TZ)["gus"].outings)
+        self.assertEqual(len(bp.analyse(self.conn, {"presence_ignore_before": {"someone-else": "2026-10-01"}}, NOW, TZ)["gus"].outings), full)
+        with self.assertLogs("bt_presence", level="WARNING"):
+            self.assertEqual(len(bp.analyse(self.conn, {"presence_ignore_before": {"gus": "last tuesday"}}, NOW, TZ)["gus"].outings), full)
+        for junk in ("nope", [], None, 5):
+            self.assertEqual(len(bp.analyse(self.conn, {"presence_ignore_before": junk}, NOW, TZ)["gus"].outings), full)
 
     def test_downtime_in_the_middle_does_not_create_fake_outings(self) -> None:
         self.phone("AA:00:00:00:00:07", "Di's iPhone")
