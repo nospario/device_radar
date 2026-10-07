@@ -244,6 +244,7 @@ function initDashboard() {
     restoreFilters();
     loadStats();
     loadDevices();
+    loadCleanup();
 
     // Show hidden triggers a re-fetch (server-side)
     document.getElementById('filter-hidden').addEventListener('change', onHiddenChange);
@@ -259,6 +260,68 @@ function initDashboard() {
         loadStats();
         loadDevices();
     }, REFRESH_INTERVAL);
+    cleanupTimer = setInterval(loadCleanup, CLEANUP_REFRESH_INTERVAL);
+}
+
+// -- Housekeeping (stale device cleanup) --
+
+let cleanupTimer = null;
+const CLEANUP_REFRESH_INTERVAL = 60000;
+
+function formatCount(n) {
+    return Number(n).toLocaleString();
+}
+
+async function loadCleanup() {
+    const summary = document.getElementById('cleanup-summary');
+    const settingsEl = document.getElementById('cleanup-settings');
+    const btn = document.getElementById('btn-cleanup');
+    if (!summary) return;
+    try {
+        const p = await api('/api/cleanup/preview');
+        const s = p.settings;
+        summary.textContent =
+            `${formatCount(p.total)} records stored · ${formatCount(p.protected)} protected (never removed) · ` +
+            `${formatCount(p.to_delete)} due for deletion · ${formatCount(p.to_hide)} due to be hidden`;
+        let mode = 'on';
+        if (!s.enabled) mode = 'off';
+        else if (s.dry_run) mode = 'in dry-run mode (logs only)';
+        settingsEl.textContent =
+            `Automatic cleanup is ${mode}: unnamed devices are hidden after ${s.hide_after_hours}h unseen, ` +
+            `deleted after ${s.delete_short_lived_after_days}d (short-lived) or ${s.delete_other_after_days}d (others). ` +
+            `Named, watchlisted, paired, linked and devices with history are never removed.`;
+        btn.disabled = (p.to_delete + p.to_hide) === 0;
+    } catch (e) {
+        console.error('Failed to load cleanup status:', e);
+        summary.textContent = 'Could not load cleanup status.';
+    }
+}
+
+async function runCleanup() {
+    const btn = document.getElementById('btn-cleanup');
+    const result = document.getElementById('cleanup-result');
+    if (!confirm('Permanently delete stale, unnamed device records now?\n\n' +
+                 'Devices you have named, watchlisted, paired or linked, and any with event history, are never touched. ' +
+                 'A database backup is taken before the first cleanup.')) return;
+    btn.disabled = true;
+    result.textContent = 'Cleaning up...';
+    try {
+        const r = await api('/api/cleanup/run', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({dry_run: false}),
+        });
+        let msg = `Done: deleted ${formatCount(r.deleted)}, hid ${formatCount(r.hidden)}.`;
+        if (r.backup) msg += ` Backup saved to ${r.backup}.`;
+        if (r.vacuumed) msg += ' Database compacted.';
+        result.textContent = msg;
+    } catch (e) {
+        console.error('Cleanup failed:', e);
+        result.textContent = 'Cleanup failed - see the bt-web log.';
+    }
+    loadStats();
+    loadDevices();
+    loadCleanup();
 }
 
 // -- Device Linking --

@@ -63,6 +63,23 @@ Schema is created/migrated in `bt_db.init_db()`. New columns are added via `_add
 9. WiFi departure confirmation: before marking a WiFi device as LOST, send targeted unicast pings to its known IP — sleeping phones often respond to direct pings even when missed by broadcast sweeps
 10. Arrival cooldown: suppress arrival notifications if the device departed less than `arrival_cooldown_seconds` ago (prevents flapping spam from WiFi sleep/wake cycles)
 11. Proximity alerts: for BLE devices with proximity enabled, generate Ollama messages and speak via Alexa when RSSI meets the configured threshold
+12. Device cleanup: every 100th cycle, `bt_cleanup` hides and deletes stale, unprotected device records (BLE devices rotate random addresses, so one phone creates thousands of one-off rows). See *Device Cleanup*.
+
+## Device Cleanup
+
+BLE devices rotate their random addresses roughly every 15 minutes and each new address becomes a new `devices` row, so unchecked the table grows by 1,000-2,000 rows a day (it reached ~76,000 rows, of which ~99% were one-off records). `bt_cleanup.py` keeps it bounded. It runs from the scanner every 100th cycle, from a "Clean up now" button on the dashboard, and from the command line.
+
+**Two stages** (both skip protected devices and anything currently `DETECTED`):
+1. **Hide** — unprotected devices not seen for `cleanup_hide_after_hours` (default 2) get `is_hidden = 1`.
+2. **Delete** — unprotected devices not seen for `cleanup_delete_short_lived_after_days` (default 3) if short-lived (last_seen - first_seen under 60 minutes, i.e. a rotated address), or `cleanup_delete_other_after_days` (default 30) otherwise. Their `news_read` rows go too. Deletes run in batches of 500, at most `max_deletes_per_run` (5,000) per scheduled run.
+
+**Protected (never hidden or deleted):** a friendly name, watchlisted / notify / paired / welcome / proximity / `dns_tracking_enabled`, an `ip_address`, linked to or from another device (`linked_to`), calendar / news / Alexa voice / proximity Alexa settings, or **any row in `events`**. An advertised name alone does not protect a device. The selection is behaviour-based, not MAC-format-based (the old `hide_stale_random_macs` used the Ethernet locally-administered bit, which is wrong for BLE and missed about half of random addresses; it and `bt_classify.is_random_mac` were removed).
+
+**Safety:** the first real purge copies the database to `backups/` (beside the DB, gitignored via `*.db`) using SQLite's backup API and records this in `migrations` (`cleanup_pre_purge_backup`); if the backup fails nothing is deleted. `cleanup_dry_run: true` makes scheduled runs only log what they would do. `foreign_keys=ON` is enforced, which is why devices with events are never deleted.
+
+**Config keys** (all optional, in `config.json`): `cleanup_enabled` (true), `cleanup_dry_run` (false), `cleanup_hide_after_hours` (2), `cleanup_delete_short_lived_after_days` (3), `cleanup_delete_other_after_days` (30), `cleanup_short_lived_max_minutes` (60), `cleanup_max_deletes_per_run` (5000), `cleanup_batch_size` (500), `cleanup_backup_before_first_purge` (true). Replaces the old `cleanup_stale_hours`. Scanner settings are read at startup, so restart `bt-scanner` after changing them.
+
+**CLI** (from the project directory): `python3 bt_cleanup.py` previews counts; `python3 bt_cleanup.py --run [--vacuum]` applies now. The manual button/API ignores the per-run cap and compacts (VACUUM) the database after a large purge.
 
 ## Device Linking
 
@@ -108,7 +125,11 @@ Presence queries use the REST API (`localhost:8080`) where possible and fall bac
   "rssi_threshold": -85,
   "db_path": "bt_radar.db",
   "web_port": 8080,
-  "cleanup_stale_hours": 24,
+  "cleanup_enabled": true,
+  "cleanup_dry_run": false,
+  "cleanup_hide_after_hours": 2,
+  "cleanup_delete_short_lived_after_days": 3,
+  "cleanup_delete_other_after_days": 30,
   "wifi_scan_enabled": true,
   "wifi_scan_interval_cycles": 4,
   "wifi_departure_threshold_seconds": 600,
@@ -152,7 +173,7 @@ On first run, if `config.json` doesn't exist, a default is created and the scrip
 Flask app on port 8080 with dark theme.
 
 ### Pages
-- **Dashboard** (`/`) — live device list with stats, filters, watchlist/notify toggles
+- **Dashboard** (`/`) — live device list with stats, filters, watchlist/notify toggles, and a Housekeeping panel (stale-record counts and a "Clean up now" button)
 - **Device Detail** (`/device/<mac>`) — info, settings (including Alexa voice selection), linking, event history, proximity Alexa config (BLE devices only), calendar selection, BBC News feed selection (all devices)
 - **History** (`/history`) — filterable paginated event log
 - **Pairing** (`/pairing`) — pair/unpair via web UI
@@ -164,6 +185,8 @@ Flask app on port 8080 with dark theme.
 - `PATCH /api/devices/<mac>` — update device fields
 - `GET /api/events` — paginated events (filters: mac, event_type)
 - `GET /api/stats` — dashboard counters
+- `GET /api/cleanup/preview` — what a cleanup would do (total, protected, to_delete, to_hide, DB size, settings); changes nothing
+- `POST /api/cleanup/run` — hide + delete stale devices now (body `{"dry_run": bool}`; real run backs up first, ignores the per-run cap, compacts the DB)
 - `POST /api/devices/<mac>/link` — link devices
 - `POST /api/devices/<mac>/pair` — initiate pairing
 - `POST /api/device/<id>/notifications` — toggle notifications
@@ -319,6 +342,7 @@ Three services:
 - Dataclasses for structured data where appropriate
 - No global mutable state — encapsulate in classes or module-level caches
 - Single-file modules (each service is one .py file)
+- Tests live in `tests/` (stdlib `unittest`, temp databases); run `python3 -m unittest discover -s tests -v` before deploying changes to `bt_cleanup.py` or the schema
 
 ## Dependencies
 
@@ -343,6 +367,7 @@ bt-monitor/
 ├── bt_web.py              # Flask web dashboard service
 ├── bt_telegram.py         # Telegram bot service
 ├── bt_db.py               # SQLite database module
+├── bt_cleanup.py          # Stale device cleanup (hide/delete, protection rules, backup, CLI)
 ├── bt_alexa.py            # Alexa TTS, welcome greetings, encouragement, proximity alerts
 ├── bt_classify.py         # Device classification logic
 ├── bt_pair.py             # Bluetooth pairing helper
@@ -359,6 +384,7 @@ bt-monitor/
 ├── bt-scanner.service     # Systemd unit for scanner
 ├── bt-web.service         # Systemd unit for web dashboard
 ├── bt-telegram.service    # Systemd unit for Telegram bot
+├── tests/                 # unittest suite (python3 -m unittest discover -s tests)
 ├── templates/             # Jinja2 templates (dashboard, device, history, pairing, assistant)
 ├── static/                # CSS and JS (dark theme)
 └── README.md

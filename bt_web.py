@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import threading
 import time as _time
 from pathlib import Path
 from typing import Any
@@ -15,6 +16,7 @@ from flask import Flask, jsonify, render_template, request
 
 import bt_alexa
 import bt_calendar
+import bt_cleanup
 import bt_db
 import bt_news
 import bt_pair
@@ -27,6 +29,9 @@ BASE_DIR = Path(__file__).resolve().parent
 
 app = Flask(__name__, template_folder=str(BASE_DIR / "templates"),
             static_folder=str(BASE_DIR / "static"))
+
+# Stops two "Clean up now" requests (e.g. a double click) running at once.
+_cleanup_lock = threading.Lock()
 
 
 def load_config() -> dict[str, Any]:
@@ -282,6 +287,46 @@ def api_stats():
     stats = bt_db.get_stats(conn)
     conn.close()
     return jsonify(stats)
+
+
+# ---------------------------------------------------------------------------
+# Housekeeping API (stale device cleanup)
+# ---------------------------------------------------------------------------
+
+@app.route("/api/cleanup/preview")
+def api_cleanup_preview():
+    settings = bt_cleanup.load_settings(load_config())
+    conn = get_conn()
+    try:
+        counts = bt_cleanup.preview(conn, settings)
+    finally:
+        conn.close()
+    return jsonify({**counts, "settings": settings.as_dict()})
+
+
+@app.route("/api/cleanup/run", methods=["POST"])
+def api_cleanup_run():
+    """Hide and delete stale devices now. Body: {"dry_run": bool} (default: real run)."""
+    body = request.get_json(silent=True) or {}
+    settings = bt_cleanup.load_settings(load_config())
+    if not _cleanup_lock.acquire(blocking=False):
+        return jsonify({"error": "A cleanup is already running"}), 409
+    conn = get_conn()
+    try:
+        result = bt_cleanup.run_cleanup(
+            conn, settings, force=True, dry_run=bool(body.get("dry_run", False)),
+            unlimited=True, vacuum=True,
+        )
+    except Exception:
+        logger.error("Manual cleanup failed", exc_info=True)
+        return jsonify({"error": "Cleanup failed - see the bt-web log"}), 500
+    finally:
+        conn.close()
+        _cleanup_lock.release()
+    if result["error"]:
+        return jsonify(result), 500
+    logger.info("Manual cleanup: %s", result)
+    return jsonify(result)
 
 
 # ---------------------------------------------------------------------------

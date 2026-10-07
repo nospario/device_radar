@@ -258,18 +258,6 @@ def classify_device(
     return info
 
 
-def is_random_mac(mac: str) -> bool:
-    """Check if a MAC address is locally administered (random).
-
-    The locally administered bit is bit 1 of the first octet.
-    This means the second hex character is one of: 2, 3, 6, 7, A, B, E, F.
-    """
-    if len(mac) < 2:
-        return False
-    second_char = mac[1].upper()
-    return second_char in ("2", "3", "6", "7", "A", "B", "E", "F")
-
-
 def parse_device_class(class_hex: str) -> int | None:
     """Parse a device class from hex string (e.g. '0x5a020c')."""
     try:

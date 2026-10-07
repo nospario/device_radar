@@ -639,28 +639,6 @@ def get_stats(conn: sqlite3.Connection) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Cleanup
-# ---------------------------------------------------------------------------
-
-def hide_stale_random_macs(conn: sqlite3.Connection, hours: int = 24) -> int:
-    """Hide devices with random MACs not seen in the given hours.
-
-    A random MAC has the locally administered bit set (second hex digit
-    is one of 2, 3, 6, 7, A, B, E, F).
-    """
-    cutoff = time.time() - (hours * 3600)
-    cur = conn.execute("""
-        UPDATE devices SET is_hidden = 1
-        WHERE is_hidden = 0
-          AND is_watchlisted = 0
-          AND last_seen < ?
-          AND SUBSTR(mac_address, 2, 1) IN ('2','3','6','7','A','B','E','F','a','b','e','f')
-    """, (cutoff,))
-    conn.commit()
-    return cur.rowcount
-
-
-# ---------------------------------------------------------------------------
 # Chat history (Telegram bot)
 # ---------------------------------------------------------------------------
 

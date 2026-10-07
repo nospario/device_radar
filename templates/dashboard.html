@@ -27,6 +27,20 @@
 
 <div class="section">
     <div class="section-header">
+        <h2>Housekeeping</h2>
+        <div class="filters">
+            <button class="btn btn-sm" id="btn-cleanup" onclick="runCleanup()" disabled>Clean up now</button>
+        </div>
+    </div>
+    <div class="cleanup-box">
+        <div id="cleanup-summary">Loading...</div>
+        <div class="text-dim" id="cleanup-settings"></div>
+        <div id="cleanup-result" class="cleanup-result"></div>
+    </div>
+</div>
+
+<div class="section">
+    <div class="section-header">
         <h2>All Devices</h2>
         <div class="filters">
             <label class="checkbox-label">

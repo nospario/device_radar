@@ -556,3 +556,16 @@ tbody tr:hover { background: var(--bg-hover); }
     .stats-row { grid-template-columns: 1fr 1fr; }
     tbody td, thead th { padding: 0.4rem 0.5rem; font-size: 0.8rem; }
 }
+
+/* Housekeeping panel */
+.cleanup-box {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 0.9rem 1rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+}
+.cleanup-result { color: var(--green); font-size: 0.85rem; }
+.cleanup-result:empty { display: none; }

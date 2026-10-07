@@ -22,6 +22,7 @@ from bleak.backends.scanner import AdvertisementData
 
 import bt_alexa
 import bt_classify
+import bt_cleanup
 import bt_db
 import bt_pair
 import bt_telegram
@@ -35,7 +36,6 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "departure_threshold_seconds": 300,
     "rssi_threshold": -85,
     "db_path": "bt_radar.db",
-    "cleanup_stale_hours": 24,
     "devices": {},
     "wifi_scan_enabled": False,
     "wifi_scan_interval_cycles": 1,
@@ -113,7 +113,7 @@ class BluetoothRadarScanner:
         self.scan_duration: int = config["scan_duration_seconds"]
         self.departure_threshold: int = config["departure_threshold_seconds"]
         self.rssi_threshold: int = config["rssi_threshold"]
-        self.cleanup_hours: int = config["cleanup_stale_hours"]
+        self.cleanup_settings = bt_cleanup.load_settings(config)
 
         self.db_path = Path(__file__).resolve().parent / config["db_path"]
         self.scan_cycle: int = 0
@@ -403,9 +403,19 @@ class BluetoothRadarScanner:
 
         # -- Periodic cleanup --
         if self.scan_cycle % 100 == 0:
-            hidden = bt_db.hide_stale_random_macs(conn, self.cleanup_hours)
-            if hidden:
-                logger.info("Hidden %d stale random-MAC devices", hidden)
+            try:
+                result = bt_cleanup.run_cleanup(conn, self.cleanup_settings)
+                if result["error"]:
+                    logger.error("Device cleanup failed: %s", result["error"])
+                elif result["dry_run"]:
+                    if result["would_delete"] or result["would_hide"]:
+                        logger.info("Cleanup (dry run): would delete %d, hide %d stale devices",
+                                    result["would_delete"], result["would_hide"])
+                elif result["deleted"] or result["hidden"]:
+                    logger.info("Cleanup: deleted %d, hid %d stale devices",
+                                result["deleted"], result["hidden"])
+            except Exception:
+                logger.error("Device cleanup failed", exc_info=True)
 
         conn.close()
 
