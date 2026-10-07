@@ -46,6 +46,20 @@ def ensure_scanner_tables(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def ensure_alert_tables(conn: sqlite3.Connection) -> None:
+    """Create the table that remembers which MACs have been announced as new.
+
+    ``kind`` is 'new' (a "new device" alert was sent or deliberately skipped) or
+    'forgotten' (the cleanup deleted the record, so a returning device must not
+    be announced as brand new again).
+    """
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS device_alerts ("
+        "mac TEXT PRIMARY KEY, kind TEXT NOT NULL, at REAL NOT NULL, status TEXT NOT NULL)"
+    )
+    conn.commit()
+
+
 def _run_migration(conn: sqlite3.Connection, name: str, sql: str) -> None:
     """Run a SQL statement once, tracked by name in the migrations table."""
     if conn.execute("SELECT 1 FROM migrations WHERE name = ?", (name,)).fetchone():
@@ -174,6 +188,8 @@ def init_db(db_path: str | Path = DEFAULT_DB_PATH) -> None:
     """)
 
     ensure_scanner_tables(conn)
+    ensure_alert_tables(conn)
+    _add_column(conn, "devices", "role", "TEXT")
 
     # One-time data migrations (tracked so they never re-run)
     conn.execute("CREATE TABLE IF NOT EXISTS migrations (name TEXT PRIMARY KEY)")
@@ -302,6 +318,7 @@ def update_device(
     calendar_calendars: str | None = None,
     news_feeds: str | None = None,
     alexa_voice: str | None = None,
+    role: str | None = None,
 ) -> bool:
     """Update specific fields on a device. Returns True if a row was updated."""
     sets: list[str] = []
@@ -361,6 +378,9 @@ def update_device(
     if alexa_voice is not None:
         sets.append("alexa_voice = ?")
         params.append(alexa_voice)
+    if role is not None:
+        sets.append("role = ?")
+        params.append(role or None)
 
     if not sets:
         return False

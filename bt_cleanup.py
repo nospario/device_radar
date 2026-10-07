@@ -50,6 +50,7 @@ from pathlib import Path
 from typing import Any
 
 import bt_db
+import bt_newdevice
 
 logger = logging.getLogger("bt_cleanup")
 
@@ -343,6 +344,7 @@ def purge_stale(
     protected = _protected_sql(conn)
     where = _where_delete(protected)
     params = _params(conn, settings, now)
+    bt_db.ensure_alert_tables(conn)  # commits, so must happen before any BEGIN below
     deleted = 0
     while deleted < limit:
         size = min(settings.batch_size, limit - deleted)
@@ -353,13 +355,15 @@ def purge_stale(
             # watchlisted/named in between and then deleted.
             conn.execute("BEGIN IMMEDIATE")
             rows = conn.execute(
-                f"SELECT d.mac_address FROM devices d WHERE {where} LIMIT :n",
+                f"SELECT d.mac_address, d.scan_type FROM devices d WHERE {where} LIMIT :n",
                 {**params, "n": size},
             ).fetchall()
             if not rows:
                 conn.rollback()
                 break
             macs = [(r[0],) for r in rows]
+            # A deleted WiFi device that comes back must not be announced as brand new.
+            bt_newdevice.forget(conn, [r[0] for r in rows if "wifi" in (r[1] or "").lower()])
             conn.executemany("DELETE FROM events WHERE mac_address = ?", macs)
             conn.executemany("DELETE FROM news_read WHERE mac_address = ?", macs)
             conn.executemany("DELETE FROM devices WHERE mac_address = ?", macs)

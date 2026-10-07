@@ -88,12 +88,27 @@ function getColumnFilters() {
     };
 }
 
+// A locally administered ("private") MAC is what phones, tablets and laptops
+// use for WiFi privacy; such addresses have no vendor.
+function isPrivateMac(mac) {
+    const first = parseInt((mac || '').split(':')[0], 16);
+    return !isNaN(first) && (first & 2) !== 0;
+}
+
+// Text for the Manufacturer column: the vendor, or "Private address" for
+// WiFi-only devices that hide theirs.
+function manufacturerLabel(d) {
+    if (d.manufacturer) return d.manufacturer;
+    if (d.scan_type === 'WiFi' && isPrivateMac(d.mac_address)) return 'Private address';
+    return '';
+}
+
 // Text the Name filter searches: the displayed name plus IP address and
 // manufacturer, so a device can be found by "192.168.1.158" or "tp-link".
 // Linked devices are merged into one row, so their IP addresses count too.
 function nameSearchText(d) {
     const linkedIps = (d.linked_devices || []).map(l => l.ip_address);
-    return [d.friendly_name || d.advertised_name || '(unknown)', d.ip_address, ...linkedIps, d.manufacturer]
+    return [d.friendly_name || d.advertised_name || '(unknown)', d.ip_address, ...linkedIps, manufacturerLabel(d)]
         .filter(Boolean).join(' ').toLowerCase();
 }
 
@@ -145,7 +160,7 @@ function renderDevices() {
             <td><code>${escapeHtml(d.mac_address)}</code></td>
             <td>${escapeHtml(d.device_type)}</td>
             <td>${scanTypeBadge(d.scan_type)}</td>
-            <td>${escapeHtml(d.manufacturer || '')}</td>
+            <td>${escapeHtml(manufacturerLabel(d))}</td>
             <td>${rssi}</td>
             <td title="${formatTime(d.last_seen)}">${lastSeen}</td>
             <td>${d.is_paired ? '<span class="state-badge state-detected">Yes</span>' : '<span class="state-badge state-lost">No</span>'}</td>

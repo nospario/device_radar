@@ -38,6 +38,12 @@ DEVICES = [
     {"mac_address": "C", "advertised_name": None, "ip_address": None, "manufacturer": "Apple"},
     {"mac_address": "D", "friendly_name": "HP ENVY Printer", "ip_address": None, "manufacturer": None,
      "linked_devices": [{"mac_address": "D2", "ip_address": "192.168.1.109"}]},
+    # WiFi device with a private (randomised) MAC: second hex digit A => locally administered
+    {"mac_address": "6A:11:22:33:44:55", "advertised_name": "Pixel.lan", "scan_type": "WiFi",
+     "ip_address": "192.168.1.60", "manufacturer": None},
+    # Bluetooth device that merely looks random must NOT be labelled "Private address"
+    {"mac_address": "6A:99:88:77:66:55", "advertised_name": "Beacon", "scan_type": "BLE",
+     "ip_address": None, "manufacturer": None},
 ]
 
 
@@ -52,7 +58,7 @@ class NameFilterTests(unittest.TestCase):
         return json.loads(result.stdout)
 
     def test_empty_filter_matches_everything(self) -> None:
-        self.assertEqual(self.search(""), ["A", "B", "C", "D"])
+        self.assertEqual(self.search(""), ["A", "B", "C", "D", "6A:11:22:33:44:55", "6A:99:88:77:66:55"])
 
     def test_matches_displayed_name(self) -> None:
         self.assertEqual(self.search("iphone"), ["A"])
@@ -65,6 +71,9 @@ class NameFilterTests(unittest.TestCase):
     def test_matches_ip_of_a_linked_device(self) -> None:
         # Linked devices are merged into one row whose own IP may be empty.
         self.assertEqual(self.search("192.168.1.109"), ["D"])
+
+    def test_private_address_label_is_searchable_for_wifi_only(self) -> None:
+        self.assertEqual(self.search("private address"), ["6A:11:22:33:44:55"])
 
     def test_matches_manufacturer(self) -> None:
         self.assertEqual(self.search("tp-link"), ["B"])

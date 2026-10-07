@@ -16,6 +16,7 @@ from typing import Any
 import httpx
 
 import bt_db
+import bt_newdevice
 import bt_search
 import bt_tasks
 
@@ -611,6 +612,139 @@ async def _cmd_today(update, context) -> None:
         conn.close()
 
 
+# ---------------------------------------------------------------------------
+# New-device naming (buttons on the "New device on the WiFi" alert, and /unnamed)
+# ---------------------------------------------------------------------------
+
+_NAMING_TIMEOUT = 900  # seconds the bot waits for a name after a role button is tapped
+
+
+def _markup_from_dict(kb: dict) -> "InlineKeyboardMarkup":
+    """Turn the plain-dict keyboard from bt_newdevice into python-telegram-bot objects."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(b["text"], callback_data=b["callback_data"]) for b in row]
+        for row in kb["inline_keyboard"]
+    ])
+
+
+def _pending_names(context) -> dict[str, dict[str, Any]]:
+    return context.bot_data.setdefault("nd_pending", {})
+
+
+async def _cmd_unnamed(update, context) -> None:
+    """Handle /unnamed: list connected WiFi devices that have no name, each with naming buttons."""
+    if not _is_authorized(update.effective_chat.id):
+        return
+    conn = bt_db.get_connection(_get_db_path())
+    try:
+        limit = 8
+        devices = bt_newdevice.list_unnamed_connected(conn, limit=limit + 1)
+    finally:
+        conn.close()
+    if not devices:
+        await update.message.reply_text("Every connected WiFi device has a name.")
+        return
+    shown = devices[:limit]
+    await update.message.reply_text(
+        f"{len(shown)}{'+' if len(devices) > limit else ''} connected device(s) without a name:",
+    )
+    for dev in shown:
+        await update.message.reply_text(
+            bt_newdevice.alert_text(dev), parse_mode="HTML",
+            reply_markup=_markup_from_dict(bt_newdevice.keyboard(dev)),
+        )
+
+
+async def _on_newdevice_callback(update, context) -> None:
+    """Handle a role button on a new-device message."""
+    query = update.callback_query
+    if not _is_authorized(query.from_user.id if query.from_user else 0) and not _is_authorized(
+        query.message.chat.id if query.message else 0,
+    ):
+        await query.answer()
+        return
+    await query.answer()
+
+    parsed = bt_newdevice.parse_callback(query.data)
+    if not parsed or not query.message:
+        return
+    action, mac = parsed
+    chat_id = str(query.message.chat.id)
+
+    conn = bt_db.get_connection(_get_db_path())
+    try:
+        dev = bt_db.get_device(conn, mac)
+        if dev is None:
+            await query.edit_message_text("That device is no longer in the list.")
+            return
+        existing = (dev.get("friendly_name") or "").strip()
+        if existing:
+            await query.edit_message_text(
+                f"Already named <b>{html.escape(existing)}</b>.", parse_mode="HTML",
+            )
+            return
+        what = bt_newdevice.describe(dev)
+        if action == bt_newdevice.IGNORE:
+            bt_newdevice.apply_role(conn, mac, action)
+            await query.edit_message_text(
+                f"\U0001f648 Ignored: {what}. It will be hidden and cleaned up later.",
+                parse_mode="HTML",
+            )
+            return
+    finally:
+        conn.close()
+
+    _pending_names(context)[chat_id] = {
+        "mac": mac, "action": action, "message_id": query.message.message_id, "at": time.time(),
+    }
+    await query.edit_message_text(
+        f"{bt_newdevice.ROLES[action]['label']}: {what}\n\n"
+        "Reply with a name for it (for example <i>Mathilde's iPhone</i>), or send <b>cancel</b>.",
+        parse_mode="HTML",
+    )
+
+
+async def _maybe_handle_naming(update, context) -> bool:
+    """If a role button is waiting for a name, treat this message as the name.
+
+    Returns True if the message was consumed.
+    """
+    chat_id = str(update.effective_chat.id)
+    pending = _pending_names(context)
+    entry = pending.get(chat_id)
+    if not entry:
+        return False
+    if time.time() - entry["at"] > _NAMING_TIMEOUT:
+        pending.pop(chat_id, None)
+        return False
+    text = (update.message.text or "").strip()
+    if text.lower() in ("cancel", "/cancel"):
+        pending.pop(chat_id, None)
+        await update.message.reply_text("Cancelled. Send /unnamed to see it again.")
+        return True
+    if len(text) > 60:
+        await update.message.reply_text("That name is too long (60 characters max). Try a shorter one, or send cancel.")
+        return True
+    pending.pop(chat_id, None)
+    conn = bt_db.get_connection(_get_db_path())
+    try:
+        result = bt_newdevice.apply_role(conn, entry["mac"], entry["action"], text)
+    finally:
+        conn.close()
+    if result["ok"]:
+        role = bt_newdevice.ROLES[entry["action"]]
+        extra = " Watched, with notifications on." if role["watch"] else ""
+        await update.message.reply_text(
+            f"\u2705 Saved as <b>{html.escape(text)}</b> ({html.escape(role['device_type'])}).{extra}",
+            parse_mode="HTML",
+        )
+    elif result["reason"] == "already_named":
+        await update.message.reply_text("That device already has a name, so I left it alone.")
+    else:
+        await update.message.reply_text("That device is no longer in the list.")
+    return True
+
+
 def _habits_daily_notes_dir() -> str:
     return load_config().get(
         "obsidian_daily_notes_dir", bt_tasks.DEFAULT_DAILY_NOTES_DIR,
@@ -1017,6 +1151,10 @@ async def _handle_message(update, context) -> None:
     if not _is_authorized(update.effective_chat.id):
         return
 
+    # A role button is waiting for a name: this message is the name
+    if await _maybe_handle_naming(update, context):
+        return
+
     text = update.message.text
     config = load_config()
     db_path = _get_db_path()
@@ -1132,7 +1270,9 @@ def main() -> None:
     app.add_handler(CommandHandler("echoes", _cmd_echoes))
     app.add_handler(CommandHandler("readaloud", _cmd_readaloud))
     app.add_handler(CommandHandler("habits", _cmd_habits))
+    app.add_handler(CommandHandler("unnamed", _cmd_unnamed))
     app.add_handler(CallbackQueryHandler(_on_habit_callback, pattern=r"^habit:"))
+    app.add_handler(CallbackQueryHandler(_on_newdevice_callback, pattern=r"^nd:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, _handle_message))
 
     # Register bot commands with Telegram so they appear in the / menu
@@ -1154,6 +1294,7 @@ def main() -> None:
             BotCommand("echoes", "List available Echo devices"),
             BotCommand("readaloud", "Toggle Alexa read-aloud for chat"),
             BotCommand("habits", "List outstanding habits (tap to complete)"),
+            BotCommand("unnamed", "Name connected devices that have no name"),
         ])
 
     app.post_init = _post_init

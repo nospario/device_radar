@@ -24,6 +24,7 @@ import bt_alexa
 import bt_classify
 import bt_cleanup
 import bt_db
+import bt_newdevice
 import bt_pair
 import bt_telegram
 import bt_wifi
@@ -114,6 +115,7 @@ class BluetoothRadarScanner:
         self.departure_threshold: int = config["departure_threshold_seconds"]
         self.rssi_threshold: int = config["rssi_threshold"]
         self.cleanup_settings = bt_cleanup.load_settings(config)
+        self.new_device_settings = bt_newdevice.load_settings(config)
 
         self.db_path = Path(__file__).resolve().parent / config["db_path"]
         self.scan_cycle: int = 0
@@ -388,7 +390,7 @@ class BluetoothRadarScanner:
                 seen_macs.add(wd.mac_address)
                 if is_new:
                     logger.info("New WiFi device detected: %s (%s)", display_name, wd.mac_address)
-                    await bt_telegram.send_notification(display_name, "arrived")
+                    await self._announce_new_wifi_device(conn, wd.mac_address)
 
         # -- State transitions --
         await self._check_arrivals(conn, seen_macs, prev_states)
@@ -425,6 +427,20 @@ class BluetoothRadarScanner:
                 logger.error("Device cleanup failed", exc_info=True)
 
         conn.close()
+
+    async def _announce_new_wifi_device(self, conn: sqlite3.Connection, mac: str) -> None:
+        """Tell Telegram about a never-seen WiFi device, with buttons to name it.
+
+        Never allowed to interrupt scanning.
+        """
+        try:
+            dev = bt_db.get_device(conn, mac)
+            if dev is not None:
+                await bt_newdevice.announce_new_wifi_device(
+                    conn, dev, self.new_device_settings, send=bt_telegram.send_message,
+                )
+        except Exception:
+            logger.error("New-device alert failed for %s", mac, exc_info=True)
 
     async def _check_arrivals(
         self, conn: sqlite3.Connection, seen_macs: set[str], prev_states: dict[str, str]

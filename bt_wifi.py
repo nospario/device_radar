@@ -11,6 +11,7 @@ import logging
 import re
 import socket
 from dataclasses import dataclass
+from pathlib import Path
 from ipaddress import IPv4Network
 from typing import Optional
 
@@ -437,10 +438,56 @@ def _resolve_hostname(ip: str) -> Optional[str]:
         return None
 
 
+# Full IEEE registry (35,000+ vendors) from the Debian ``ieee-data`` package.
+# Falls back to the short built-in OUI_VENDORS table if the file is missing.
+OUI_FILE = Path("/usr/share/ieee-data/oui.txt")
+_oui_table: Optional[dict[str, str]] = None
+
+
+def _load_oui_table(path: Path = OUI_FILE) -> dict[str, str]:
+    """Parse the IEEE oui.txt into {"AA:BB:CC": "Vendor Name"}."""
+    table: dict[str, str] = {}
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if "(hex)" not in line:
+                    continue
+                prefix, _, vendor = line.partition("(hex)")
+                prefix = prefix.strip().replace("-", ":").upper()
+                vendor = vendor.strip()
+                if len(prefix) == 8 and vendor:
+                    table[prefix] = vendor
+    except OSError:
+        logger.warning("OUI vendor list %s not readable; using the built-in short list", path)
+    return table
+
+
+def is_private_mac(mac: str) -> bool:
+    """True for a locally administered (randomised / "private") MAC address.
+
+    Phones, tablets and laptops use these for WiFi privacy, so the address
+    carries no vendor information. This is the IEEE "locally administered" bit
+    (0x02 of the first octet); it is meaningful for WiFi/Ethernet addresses,
+    not for Bluetooth LE random addresses.
+    """
+    try:
+        return bool(int(mac.split(":")[0], 16) & 0x02)
+    except (ValueError, IndexError):
+        return False
+
+
 def lookup_oui_vendor(mac: str) -> Optional[str]:
-    """Look up the vendor from the OUI (first 3 octets) of a MAC address."""
+    """Look up the vendor from the OUI (first 3 octets) of a MAC address.
+
+    Returns None for private (randomised) addresses, which have no vendor.
+    """
+    global _oui_table
+    if is_private_mac(mac):
+        return None
+    if _oui_table is None:
+        _oui_table = _load_oui_table()
     prefix = mac.upper()[:8]  # "AA:BB:CC"
-    return OUI_VENDORS.get(prefix)
+    return _oui_table.get(prefix) or OUI_VENDORS.get(prefix)
 
 
 async def scan_wifi(

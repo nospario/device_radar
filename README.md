@@ -38,6 +38,7 @@ Supporting modules:
 
    ```bash
    sudo pip install -r /opt/bt-monitor/requirements.txt --break-system-packages
+   sudo apt install ieee-data   # offline vendor list for identifying WiFi devices
    ```
 
 3. **Edit the config:**
@@ -103,6 +104,7 @@ The Telegram bot (`bt_telegram.py`) provides interactive presence queries and ge
 | Command | Description |
 |---|---|
 | `/home` | Quick summary of who's detected |
+| `/unnamed` | List connected WiFi devices that have no name, with buttons to name them |
 | `/devices` | List all watchlisted devices with status |
 | `/lastseen <name>` | When a device was last seen |
 

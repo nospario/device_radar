@@ -41,11 +41,12 @@ Supporting modules:
 
 SQLite with WAL mode (`bt_radar.db`). Core tables:
 
-- **devices** — all known devices with state (`DETECTED`/`LOST`), scan info, flags (`is_watchlisted`, `is_notify`, `is_hidden`, `is_paired`), device linking (`linked_to`), proximity alert settings (`proximity_enabled`, `proximity_rssi_threshold`, `proximity_interval`, `proximity_alexa_device`, `proximity_prompt`, `last_proximity_message`), calendar integration (`calendar_calendars` — JSON array of calendar names), news feed selection (`news_feeds` — JSON array of feed keys), and Alexa voice selection (`alexa_voice` — Amazon Polly voice name for SSML)
+- **devices** — all known devices with state (`DETECTED`/`LOST`), scan info, flags (`is_watchlisted`, `is_notify`, `is_hidden`, `is_paired`), device linking (`linked_to`), `role` (`phone`/`laptop`/`smart_home`, set when a device is named from Telegram), proximity alert settings (`proximity_enabled`, `proximity_rssi_threshold`, `proximity_interval`, `proximity_alexa_device`, `proximity_prompt`, `last_proximity_message`), calendar integration (`calendar_calendars` — JSON array of calendar names), news feed selection (`news_feeds` — JSON array of feed keys), and Alexa voice selection (`alexa_voice` — Amazon Polly voice name for SSML)
 - **events** — arrival/departure event log with timestamps
 - **news_headlines** — fetched BBC RSS headlines with guid deduplication, feed_key, title, published timestamp
 - **news_read** — per-device read tracking (mac_address + headline_id), ensures headlines aren't repeated
 - **chat_history** — conversation history for Ollama context (Telegram bot, keyed by numeric chat_id; entries older than 7 days are cleaned up on bot start)
+- **device_alerts** — which MACs have been announced as new (`kind` 'new') or deleted by the cleanup (`kind` 'forgotten'), see *New Device Alerts*
 - **scanner_state** / **scanner_gaps** — scanner heartbeat and recorded downtime periods (used by the cleanup, see *Device Cleanup*)
 - **migrations** — tracks one-time data migrations
 
@@ -106,7 +107,7 @@ Devices can appear with different MACs across scan types (BLE vs WiFi). The `lin
 - **Presence queries** — intent-routed via regex patterns (no LLM needed):
   - "who's home", "is anyone home", "is Richard home", "where is Laura"
   - "when did Richard arrive", "how long has Laura been away"
-  - `/home`, `/devices`, `/lastseen <name>` slash commands
+  - `/home`, `/devices`, `/lastseen <name>`, `/unnamed` slash commands
 - **Person resolution** — maps names to devices via `person_aliases` config, then fuzzy-matches `friendly_name`, then resolves link groups
 - **General chat** — forwarded to local Ollama instance (configurable model, default `gemma3:4b`); emoji suppressed via system prompt
 - **Conversation history** — stored in `chat_history` SQLite table, last N messages sent as context
@@ -300,6 +301,20 @@ When a voice is set, the `speak()` function in `bt_alexa.py` wraps the message i
 
 Before marking a WiFi device as LOST, the scanner sends targeted unicast pings to the device's known IP address via `bt_wifi.ping_host()`. Sleeping phones (especially iPhones) often miss broadcast ping sweeps but respond to direct pings. If the device responds, `last_seen` is updated and departure is cancelled. This prevents false departure/arrival flapping for WiFi-tracked devices.
 
+## New Device Alerts
+
+Module: `bt_newdevice.py`. When the WiFi scan finds a MAC that was never stored, the scanner (`_announce_new_wifi_device`) sends one Telegram message: hostname, IP, MAC, vendor (or an explanation that it uses a **private address**), a "Looks like" guess, and buttons **Phone / Laptop / Smart home / Ignore**. This replaced the old bare "📡 name detected" message.
+
+- **Naming flow** (handlers in `bt_telegram.py`: `_on_newdevice_callback`, `_maybe_handle_naming`): tapping a role asks "Reply with a name"; the next message from the authorised chat is the name (send `cancel` to abort; expires after 15 min; `_handle_message` checks this before presence/chat routing). `bt_newdevice.apply_role` then sets `friendly_name`, `device_type`, `role` and watch/notify: **Phone** = named + watched + notify on (phones drive home/away alerts); **Laptop** (laptops/tablets) and **Smart home** = named only; **Ignore** = hidden (the cleanup removes it later). It never overwrites an existing friendly name. Callback payloads are `nd:<phone|laptop|home|ignore>:<MAC>` and are validated by `parse_callback`.
+- **`/unnamed`** lists connected, visible, unnamed WiFi devices (not linked secondaries), at most 8, each with the same buttons. Use it for devices that connected before the alert existed or while Telegram was unreachable.
+- **Announced once per MAC** (`device_alerts` table, `kind='new'`). The cleanup records the WiFi devices it deletes as `kind='forgotten'` (inside the delete transaction, `bt_newdevice.forget`, which must not commit) so a returning device is not "new" again. BLE devices are never announced (their addresses rotate every ~15 minutes).
+- **Hostname guess** (`guess_action`): whole-word match on hostname parts (so "Sterling" is not "ring"), then vendor (TP-Link, Ring, Amazon, ...). Only a hint (the guessed button is starred and listed first).
+- **Config keys** (all optional): `new_device_alerts_enabled` (true), `new_device_alerts_dry_run` (false: log "would announce" only), `new_device_alerts_max_per_hour` (6; extra devices are recorded as `suppressed` and found via `/unnamed`).
+
+### Vendor lookup
+
+`bt_wifi.lookup_oui_vendor()` reads the full IEEE registry (`/usr/share/ieee-data/oui.txt`, apt package **`ieee-data`**, ~35,800 vendors, loaded once on first use) and falls back to the short built-in `OUI_VENDORS` table if the file is missing. A **locally administered** address (bit 0x02 of the first octet, `bt_wifi.is_private_mac`) is a private/randomised WiFi address and has no vendor; the dashboard shows "Private address" in the Manufacturer column for WiFi-only devices (`manufacturerLabel` in `static/app.js`, searchable). The locally administered test is meaningful for WiFi/Ethernet MACs only, not for Bluetooth LE random addresses. Vendor names are filled in on the next WiFi scan.
+
 ## Discovery Mode
 
 ```bash
@@ -357,6 +372,8 @@ ollama>=0.4.0
 
 Install: `pip install -r requirements.txt --break-system-packages`
 
+System package: `sudo apt install ieee-data` (offline WiFi vendor list used by `bt_wifi.lookup_oui_vendor`; without it only ~285 built-in vendors are recognised).
+
 ## File Structure
 
 ```
@@ -366,6 +383,7 @@ bt-monitor/
 ├── bt_telegram.py         # Telegram bot service
 ├── bt_db.py               # SQLite database module
 ├── bt_cleanup.py          # Stale device cleanup (hide/delete, protection rules, backup, CLI)
+├── bt_newdevice.py        # New WiFi device alerts + tap-to-name from Telegram
 ├── bt_alexa.py            # Alexa TTS, welcome greetings, encouragement, proximity alerts
 ├── bt_classify.py         # Device classification logic
 ├── bt_pair.py             # Bluetooth pairing helper
