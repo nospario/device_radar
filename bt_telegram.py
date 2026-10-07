@@ -17,6 +17,7 @@ import httpx
 
 import bt_db
 import bt_newdevice
+import bt_people
 import bt_search
 import bt_tasks
 
@@ -150,6 +151,54 @@ def is_presence_query(text: str) -> bool:
     return any(p.search(text) for p in _PRESENCE_PATTERNS)
 
 
+_PEOPLE_ICON = {"home": "\U0001f7e2", "away": "\U0001f534", "no_phone": "\u26aa"}
+
+
+def _people_detail(p: dict[str, Any]) -> str:
+    if p["state"] == "home":
+        return f"arrived {_time_ago(p['since'])}" if p["since"] else "home"
+    if p["state"] == "away":
+        if p["since"]:
+            return f"left {_time_ago(p['since'])}"
+        return f"last seen {_time_ago(p['last_seen'])}" if p["last_seen"] else "away"
+    return "no phone tracked"
+
+
+def format_people_summary(people: list[dict[str, Any]], connected_devices: int | None = None) -> str:
+    """Who is home, one line per person (decided by phones, see bt_people)."""
+    # Plain text (these replies are not sent with a parse mode). Person keys are
+    # already limited to letters, digits, spaces and hyphens by normalise_person.
+    lines = [f"{_PEOPLE_ICON[p['state']]} {p['display']} \u2014 {_people_detail(p)}" for p in people]
+    if connected_devices is not None:
+        lines.append(f"\n{connected_devices} device(s) connected in total. /devices lists them all.")
+    return "\n".join(lines)
+
+
+def _people_summary_text(db_path: Path, config: dict[str, Any]) -> str | None:
+    """The who's-home summary, or None if no people are set up yet (callers then list devices)."""
+    conn = bt_db.get_connection(db_path)
+    try:
+        people = bt_people.people_status(conn, config)
+        if not people:
+            return None
+        connected = conn.execute(
+            "SELECT COUNT(*) FROM devices WHERE state = 'DETECTED' AND linked_to IS NULL AND is_hidden = 0",
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    return format_people_summary(people, connected)
+
+
+def no_phone_message(entry: dict[str, Any]) -> str:
+    """Reply when someone is known but has no phone tracked."""
+    name = entry["display"]
+    msg = f"No phone is tracked for {name}, so I can't tell whether they're home."
+    if entry["others"]:
+        shown = ", ".join(entry["others"][:3])
+        msg += f" ({shown} {'is' if len(entry['others']) == 1 else 'are'} known, but only phones count.)"
+    return msg + " Send /unnamed to name a new phone, or set a device's Role to Phone in the dashboard."
+
+
 def _extract_person(text: str) -> str | None:
     """Extract a person name from a presence query."""
     patterns = [
@@ -200,6 +249,10 @@ def _resolve_person(
         for d in bt_db.get_all_devices(conn, include_hidden=True):
             if (d.get("friendly_name") or "").lower() == target.lower():
                 return d
+    # The person's phone (people and roles, see bt_people)
+    phone = bt_people.best_phone(conn, config, name)
+    if phone:
+        return phone
     # Fuzzy match on friendly_name
     for d in bt_db.get_all_devices(conn, include_hidden=True):
         if name.lower() in (d.get("friendly_name") or "").lower():
@@ -232,6 +285,9 @@ async def answer_presence(
         r"\b(who'?s|who\s+is|is\s+anyone|anyone|what\s+devices?)"
         r"\s+(home|in|here|present|detected|connected)\b", lower,
     ):
+        summary = _people_summary_text(db_path, config)
+        if summary:
+            return summary
         data = await _api_get("/api/devices/present")
         if data is None:
             return "Couldn't reach Device Radar."
@@ -248,6 +304,9 @@ async def answer_presence(
     if person:
         conn = bt_db.get_connection(db_path)
         try:
+            entry = bt_people.person_entry(conn, config, person)
+            if entry and entry["state"] == "no_phone":
+                return no_phone_message(entry)
             dev = _resolve_person(person, config, conn)
             if not dev:
                 return f"I don't know who \"{person}\" is. Add them to person_aliases in config."
@@ -359,6 +418,11 @@ async def _cmd_home(update, context) -> None:
     if not _is_authorized(update.effective_chat.id):
         return
     _, wl = _parse_args(context.args)
+    if not wl:
+        summary = _people_summary_text(_get_db_path(), load_config())
+        if summary:
+            await update.message.reply_text(summary)
+            return
     params: dict[str, str] = {"state": "DETECTED"}
     if wl:
         params["watchlisted"] = "1"

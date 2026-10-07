@@ -41,7 +41,7 @@ Supporting modules:
 
 SQLite with WAL mode (`bt_radar.db`). Core tables:
 
-- **devices** — all known devices with state (`DETECTED`/`LOST`), scan info, flags (`is_watchlisted`, `is_notify`, `is_hidden`, `is_paired`), device linking (`linked_to`), `role` (`phone`/`laptop`/`smart_home`, set when a device is named from Telegram), proximity alert settings (`proximity_enabled`, `proximity_rssi_threshold`, `proximity_interval`, `proximity_alexa_device`, `proximity_prompt`, `last_proximity_message`), calendar integration (`calendar_calendars` — JSON array of calendar names), news feed selection (`news_feeds` — JSON array of feed keys), and Alexa voice selection (`alexa_voice` — Amazon Polly voice name for SSML)
+- **devices** — all known devices with state (`DETECTED`/`LOST`), scan info, flags (`is_watchlisted`, `is_notify`, `is_hidden`, `is_paired`), device linking (`linked_to`), `role` (`phone`/`laptop`/`smart_home`/`other`, optional; otherwise implied by the device type) and `person` (optional; otherwise taken from the name), see *People and Roles*, proximity alert settings (`proximity_enabled`, `proximity_rssi_threshold`, `proximity_interval`, `proximity_alexa_device`, `proximity_prompt`, `last_proximity_message`), calendar integration (`calendar_calendars` — JSON array of calendar names), news feed selection (`news_feeds` — JSON array of feed keys), and Alexa voice selection (`alexa_voice` — Amazon Polly voice name for SSML)
 - **events** — arrival/departure event log with timestamps
 - **news_headlines** — fetched BBC RSS headlines with guid deduplication, feed_key, title, published timestamp
 - **news_read** — per-device read tracking (mac_address + headline_id), ensures headlines aren't repeated
@@ -84,6 +84,17 @@ BLE devices rotate their random addresses roughly every 15 minutes and each new 
 **Config keys** (all optional, in `config.json`): `cleanup_enabled` (true), `cleanup_dry_run` (false), `cleanup_hide_after_hours` (2), `cleanup_delete_short_lived_after_days` (3), `cleanup_delete_other_after_days` (30), `cleanup_short_lived_max_minutes` (60), `cleanup_max_deletes_per_run` (5000), `cleanup_batch_size` (500), `cleanup_backup_before_first_purge` (true). Replaces the old `cleanup_stale_hours`. Scanner settings are read at startup, so restart `bt-scanner` after changing them.
 
 **CLI** (from the project directory): `python3 bt_cleanup.py` previews counts; `python3 bt_cleanup.py --run [--vacuum]` applies now. The manual button/API ignores the per-run cap and compacts (VACUUM) the database after a large purge.
+
+## People and Roles
+
+Module: `bt_people.py`. Home/away for a **person** is decided by their **phone**, not by laptops or smart-home gear that sit on the WiFi all day.
+
+- **Role** (`devices.role`, one of `phone` / `laptop` / `smart_home` / `other`): if empty it is worked out from the device type (`role_from_type`: Phone/iPhone = phone; Laptop/Desktop/Tablet = laptop; Smart Speaker/Smart Plug/IoT/WiFi Router/Printer/TV/... = smart_home; "Network Device"/"Unknown" = no role). So devices named before roles existed need no migration. Settable on the device page ("Role") and set automatically when naming from Telegram.
+- **Person** (`devices.person`): if empty it is taken from the friendly name when it has the form "<Name>'s ..." (`person_from_name`: "Laura's MacBook" belongs to `laura`). Keys are lowercase letters/digits/space/hyphen (`normalise_person`). People also come from the keys of `person_aliases` in config.json.
+- **Home / away / no phone** (`people_status`): *home* if any phone in the person's group (the phone plus its linked WiFi/Bluetooth records) is `DETECTED`; *away* if they have a phone but none is detected; *no_phone* if no phone is tracked for them. `since` is the last `arrived` (home) or `departed` (away) event of the phone group.
+- **Alerts are phone-only** (`notify_allowed`, used at all four notification sites in `bt_scanner._check_arrivals/_check_departures`): a Telegram arrival/departure alert needs `is_notify` on some member of the device's link group **and** (config `notify_phones_only`, default true) a phone in that group. Laptops and smart-home devices with notify switched on stay silent; their events are still recorded. Set `"notify_phones_only": false` to restore the old behaviour.
+- **Surfaces**: dashboard "who's home" strip (`/api/people`, `renderPeople` in `static/app.js`); Telegram "who's home" and `/home` answer **by person** (`format_people_summary`); "is Laura home?" answers from the person's phone (`bt_people.best_phone`) and, if none is tracked, says so (`no_phone_message`) instead of falling back to a laptop; `GET /api/devices` adds `effective_role` / `effective_person`; `PATCH /api/devices/<mac>` accepts `role` (validated) and `person` (sanitised).
+- **Config-seeded devices**: `devices` in config.json (MAC -> name) are re-created and set watched + notify on **every scanner start** (`bt_scanner.migrate_config_devices`), so deleting such a record in the database does not stick. Remove its entry from config.json as well (done for an old phone on 7 Oct 2026).
 
 ## Device Linking
 
@@ -177,7 +188,7 @@ On first run, if `config.json` doesn't exist, a default is created and the scrip
 Flask app on port 8080 with dark theme.
 
 ### Pages
-- **Dashboard** (`/`) — live device list with stats, per-column filters (the Name filter also matches IP address and manufacturer), watchlist/notify toggles, and a Housekeeping panel (stale-record counts and a "Clean up now" button)
+- **Dashboard** (`/`) — "who's home" strip (one chip per person, decided by phones), live device list with stats, per-column filters (the Name filter also matches IP address and manufacturer), watchlist/notify toggles, and a Housekeeping panel (stale-record counts and a "Clean up now" button)
 - **Device Detail** (`/device/<mac>`) — info, settings (including Alexa voice selection), linking, event history, proximity Alexa config (BLE devices only), calendar selection, BBC News feed selection (all devices)
 - **History** (`/history`) — filterable paginated event log
 - **Pairing** (`/pairing`) — pair/unpair via web UI
@@ -185,9 +196,10 @@ Flask app on port 8080 with dark theme.
 - `GET /api/devices` — all devices (filters: state, watchlisted, hidden, scan_type, unmerged)
 - `GET /api/devices/present` — currently detected devices (merged)
 - `GET /api/devices/<mac>` — single device
-- `PATCH /api/devices/<mac>` — update device fields
+- `PATCH /api/devices/<mac>` — update device fields (including `role` and `person`)
 - `GET /api/events` — paginated events (filters: mac, event_type)
 - `GET /api/stats` — dashboard counters
+- `GET /api/people` — home/away per person, decided by phones (see *People and Roles*)
 - `GET /api/cleanup/preview` — what a cleanup would do (total, protected, to_delete, to_hide, DB size, settings); changes nothing
 - `POST /api/cleanup/run` — hide + delete stale devices now (body `{"dry_run": bool}`; real run backs up first, ignores the per-run cap, compacts the DB)
 - `POST /api/devices/<mac>/link` — link devices
@@ -384,6 +396,7 @@ bt-monitor/
 ├── bt_db.py               # SQLite database module
 ├── bt_cleanup.py          # Stale device cleanup (hide/delete, protection rules, backup, CLI)
 ├── bt_newdevice.py        # New WiFi device alerts + tap-to-name from Telegram
+├── bt_people.py           # People, device roles, phone-only alerts, who's home
 ├── bt_alexa.py            # Alexa TTS, welcome greetings, encouragement, proximity alerts
 ├── bt_classify.py         # Device classification logic
 ├── bt_pair.py             # Bluetooth pairing helper

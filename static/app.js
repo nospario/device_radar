@@ -267,6 +267,7 @@ function onHiddenChange() {
 function initDashboard() {
     restoreFilters();
     loadStats();
+    loadPeople();
     loadDevices();
     loadCleanup();
 
@@ -282,9 +283,51 @@ function initDashboard() {
     // Auto-refresh
     dashboardTimer = setInterval(() => {
         loadStats();
+        loadPeople();
         loadDevices();
     }, REFRESH_INTERVAL);
     cleanupTimer = setInterval(loadCleanup, CLEANUP_REFRESH_INTERVAL);
+}
+
+// -- People: who is home, decided by each person's phone --
+
+const PEOPLE_ICON = {home: '\u{1F7E2}', away: '\u{1F534}', no_phone: '\u26AA'};
+
+function peopleChipText(p) {
+    if (p.state === 'home') return p.since ? `arrived ${timeAgo(p.since)}` : 'home';
+    if (p.state === 'away') {
+        if (p.since) return `left ${timeAgo(p.since)}`;
+        return p.last_seen ? `last seen ${timeAgo(p.last_seen)}` : 'away';
+    }
+    return 'no phone tracked';
+}
+
+// escapeHtml() is for text content; inside an attribute value quotes must be escaped too.
+function escapeAttr(str) {
+    return escapeHtml(str).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+function renderPeople(people) {
+    const strip = document.getElementById('people-strip');
+    if (!strip) return;
+    if (!people.length) { strip.hidden = true; return; }
+    strip.hidden = false;
+    strip.innerHTML = people.map(p => {
+        const tip = p.state === 'no_phone'
+            ? 'Only phones count as presence. Name this person\'s phone "' + p.display + '\'s iPhone" or set its Person.'
+            : (p.phones.length ? 'Phone: ' + p.phones.join(', ') : '');
+        return `<span class="person-chip person-${p.state}" title="${escapeAttr(tip)}">` +
+               `${PEOPLE_ICON[p.state] || ''} <strong>${escapeHtml(p.display)}</strong> ` +
+               `<span class="person-detail">${escapeHtml(peopleChipText(p))}</span></span>`;
+    }).join('');
+}
+
+async function loadPeople() {
+    try {
+        renderPeople(await api('/api/people'));
+    } catch (e) {
+        console.error('Failed to load people:', e);
+    }
 }
 
 // -- Housekeeping (stale device cleanup) --
@@ -518,6 +561,8 @@ function initDevicePage(mac) {
                 body: JSON.stringify({
                     friendly_name: document.getElementById('friendly-name').value,
                     device_type: deviceType,
+                    role: document.getElementById('device-role').value,
+                    person: document.getElementById('device-person').value,
                     is_watchlisted: document.getElementById('is-watchlisted').checked,
                     is_notify: document.getElementById('is-notify').checked,
                     is_welcome: document.getElementById('is-welcome').checked,

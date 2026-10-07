@@ -190,6 +190,7 @@ def init_db(db_path: str | Path = DEFAULT_DB_PATH) -> None:
     ensure_scanner_tables(conn)
     ensure_alert_tables(conn)
     _add_column(conn, "devices", "role", "TEXT")
+    _add_column(conn, "devices", "person", "TEXT")
 
     # One-time data migrations (tracked so they never re-run)
     conn.execute("CREATE TABLE IF NOT EXISTS migrations (name TEXT PRIMARY KEY)")
@@ -319,6 +320,7 @@ def update_device(
     news_feeds: str | None = None,
     alexa_voice: str | None = None,
     role: str | None = None,
+    person: str | None = None,
 ) -> bool:
     """Update specific fields on a device. Returns True if a row was updated."""
     sets: list[str] = []
@@ -381,6 +383,9 @@ def update_device(
     if role is not None:
         sets.append("role = ?")
         params.append(role or None)
+    if person is not None:
+        sets.append("person = ?")
+        params.append(person or None)
 
     if not sets:
         return False

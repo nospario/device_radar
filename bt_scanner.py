@@ -26,6 +26,7 @@ import bt_cleanup
 import bt_db
 import bt_newdevice
 import bt_pair
+import bt_people
 import bt_telegram
 import bt_wifi
 
@@ -515,7 +516,7 @@ class BluetoothRadarScanner:
                     )
 
                     if not other_was_home:
-                        group_notify = any(m.get("is_notify") for m in all_members)
+                        group_notify = bt_people.notify_allowed(self.config, all_members)
                         if group_notify:
                             notified_groups.add(primary_mac)
                             await bt_telegram.send_notification(notify_name, "arrived")
@@ -532,7 +533,7 @@ class BluetoothRadarScanner:
                         )
             else:
                 # Standalone device (not in a link group)
-                if dev["is_notify"]:
+                if bt_people.notify_allowed(self.config, [dev]):
                     await bt_telegram.send_notification(dev_name, "arrived")
 
                 # Alexa welcome announcement (independent of notify)
@@ -644,14 +645,14 @@ class BluetoothRadarScanner:
                 if any_still_home:
                     continue
 
-                group_notify = any(m.get("is_notify") for m in [primary] + group["secondaries"])
+                group_notify = bt_people.notify_allowed(self.config, [primary] + group["secondaries"])
                 if not group_notify:
                     continue
 
                 notified_groups.add(primary_mac)
                 notify_name = primary["friendly_name"] or primary["advertised_name"] or primary_mac
                 await bt_telegram.send_notification(notify_name, "departed")
-            elif dev["is_notify"]:
+            elif bt_people.notify_allowed(self.config, [dev]):
                 await bt_telegram.send_notification(dev_name, "departed")
 
     # ------------------------------------------------------------------

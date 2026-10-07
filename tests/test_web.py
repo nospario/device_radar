@@ -64,6 +64,65 @@ class WebSmokeTests(unittest.TestCase):
         devices = self.client.get("/api/echo-devices").get_json()
         self.assertEqual([d["device_name"] for d in devices], ["Kitchen Echo"])
 
+    def device(self, mac: str) -> dict:
+        conn = bt_db.get_connection(bt_web.get_db_path())
+        try:
+            return bt_db.get_device(conn, mac)
+        finally:
+            conn.close()
+
+    def patch(self, mac: str, body: dict):
+        return self.client.patch(f"/api/devices/{mac}", json=body)
+
+    def test_people_endpoint_reports_home_by_phone(self) -> None:
+        conn = bt_db.get_connection(bt_web.get_db_path())
+        bt_db.upsert_device(conn, "AA:BB:CC:00:00:02", advertised_name="x", scan_type="BLE")
+        bt_db.update_device(conn, "AA:BB:CC:00:00:02", friendly_name="Lilou's iPhone", device_type="Phone")
+        bt_db.upsert_device(conn, "AA:BB:CC:00:00:03", advertised_name="y", scan_type="WiFi")
+        bt_db.update_device(conn, "AA:BB:CC:00:00:03", friendly_name="Laura's MacBook", device_type="Laptop")
+        conn.close()
+        people = {p["person"]: p for p in self.client.get("/api/people").get_json()}
+        self.assertEqual(people["lilou"]["state"], "home")
+        self.assertEqual(people["laura"]["state"], "no_phone")
+        self.assertEqual(people["laura"]["others"], ["Laura's MacBook"])
+
+    def test_device_list_includes_effective_role_and_person(self) -> None:
+        self.patch("AA:BB:CC:00:00:01", {"friendly_name": "Ava's iPad", "device_type": "Tablet"})
+        dev = next(d for d in self.client.get("/api/devices").get_json() if d["mac_address"] == "AA:BB:CC:00:00:01")
+        self.assertEqual((dev["effective_role"], dev["effective_person"]), ("laptop", "ava"))
+
+    def test_role_and_person_can_be_set_and_cleared(self) -> None:
+        mac = "AA:BB:CC:00:00:01"
+        self.assertEqual(self.patch(mac, {"role": "phone", "person": "  Sam  "}).status_code, 200)
+        dev = self.device(mac)
+        self.assertEqual((dev["role"], dev["person"]), ("phone", "sam"))
+        self.assertEqual(self.patch(mac, {"role": "", "person": ""}).status_code, 200)
+        dev = self.device(mac)
+        self.assertEqual((dev["role"], dev["person"]), (None, None))
+
+    def test_bad_role_is_rejected_and_nothing_changes(self) -> None:
+        mac = "AA:BB:CC:00:00:01"
+        r = self.patch(mac, {"role": "wizard", "friendly_name": "Changed"})
+        self.assertEqual(r.status_code, 400)
+        dev = self.device(mac)
+        self.assertIsNone(dev["role"])
+        self.assertNotEqual(dev["friendly_name"], "Changed")
+
+    def test_person_is_sanitised(self) -> None:
+        mac = "AA:BB:CC:00:00:01"
+        self.patch(mac, {"person": "<script>Anne-Marie</script>"})
+        dev = self.device(mac)
+        self.assertNotIn("<", dev["person"])
+        self.assertEqual(dev["person"], "scriptanne-mariescript")
+
+    def test_device_page_offers_role_and_person(self) -> None:
+        html = self.client.get("/device/AA:BB:CC:00:00:01").get_data(as_text=True)
+        self.assertIn('id="device-role"', html)
+        self.assertIn('id="device-person"', html)
+
+    def test_dashboard_has_the_people_strip(self) -> None:
+        self.assertIn('id="people-strip"', self.client.get("/").get_data(as_text=True))
+
     def test_telegram_chat_helpers_still_exist(self) -> None:
         # The Telegram bot shares the chat history table and the async search chat.
         import bt_search

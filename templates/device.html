@@ -118,6 +118,22 @@
                            placeholder="e.g. Richard's Phone">
                 </div>
                 <div class="form-group">
+                    <label for="device-role">Role</label>
+                    <select id="device-role">
+                        <option value="" {% if not device.role %}selected{% endif %}>Automatic{% if auto_role %} ({{ auto_role.replace('_', ' ') }}){% endif %}</option>
+                        {% for r, label in [('phone','Phone (drives home/away and alerts)'),('laptop','Laptop / tablet'),('smart_home','Smart home / infrastructure'),('other','Other')] %}
+                        <option value="{{ r }}" {% if device.role == r %}selected{% endif %}>{{ label }}</option>
+                        {% endfor %}
+                    </select>
+                    <small class="text-dim">Only phones decide whether a person is home, and (by default) only phones send arrival/departure alerts.</small>
+                </div>
+                <div class="form-group">
+                    <label for="device-person">Person</label>
+                    <input type="text" id="device-person" value="{{ device.person or '' }}"
+                           placeholder="{{ auto_person or 'e.g. laura' }}">
+                    <small class="text-dim">Leave empty to take it from the name ("Laura's iPhone" belongs to laura).</small>
+                </div>
+                <div class="form-group">
                     <label for="device-type">Device Type</label>
                     <div class="type-input-row">
                         <select id="device-type">

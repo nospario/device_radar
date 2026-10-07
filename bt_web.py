@@ -17,6 +17,7 @@ import bt_cleanup
 import bt_db
 import bt_news
 import bt_pair
+import bt_people
 
 logger = logging.getLogger("bt_web")
 
@@ -116,6 +117,8 @@ def device_detail(mac: str):
         custom_types=custom_types, echo_devices=echo_devices,
         calendar_names=calendar_names, device_calendars=device_calendars,
         news_feeds=news_feeds, device_news_feeds=device_news_feeds,
+        auto_role=bt_people.role_from_type(device.get("device_type")),
+        auto_person=bt_people.person_from_name(device.get("friendly_name")),
         active="",
     )
 
@@ -167,6 +170,9 @@ def api_devices():
             scan_type=scan_type or None,
         )
     conn.close()
+    for dev in devices:
+        dev["effective_role"] = bt_people.effective_role(dev)
+        dev["effective_person"] = bt_people.effective_person(dev)
     return jsonify(devices)
 
 
@@ -217,6 +223,14 @@ def api_update_device(mac: str):
         kwargs["news_feeds"] = data["news_feeds"]
     if "alexa_voice" in data:
         kwargs["alexa_voice"] = data["alexa_voice"]
+    if "role" in data:
+        role = (data["role"] or "").strip().lower()
+        if role and role not in bt_people.ROLES:
+            conn.close()
+            return jsonify({"error": f"role must be one of {', '.join(bt_people.ROLES)}"}), 400
+        kwargs["role"] = role  # "" clears it (the role is then worked out from the device type)
+    if "person" in data:
+        kwargs["person"] = bt_people.normalise_person(data["person"]) or ""
 
     updated = bt_db.update_device(conn, mac, **kwargs)
     conn.close()
@@ -266,6 +280,17 @@ def api_events():
     total = bt_db.count_events(conn, mac=mac or None, event_type=event_type or None)
     conn.close()
     return jsonify({"events": events, "total": total})
+
+
+@app.route("/api/people")
+def api_people():
+    """Home/away for each person, decided by their phone (see bt_people)."""
+    conn = get_conn()
+    try:
+        people = bt_people.people_status(conn, load_config())
+    finally:
+        conn.close()
+    return jsonify(people)
 
 
 @app.route("/api/stats")

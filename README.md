@@ -188,6 +188,7 @@ Edit `config.json` in the same directory as the scripts:
 | `rssi_threshold` | `-85` | Minimum signal strength (dBm); weaker signals are ignored |
 | `db_path` | `bt_radar.db` | Path to the SQLite database file |
 | `web_port` | `8080` | Port for the web dashboard |
+| `notify_phones_only` | `true` | Only phones send arrival/departure Telegram alerts (laptops and smart-home devices stay silent even with notify on) |
 | `cleanup_enabled` | `true` | Automatically hide/delete stale, unnamed device records (see CLAUDE.md, *Device Cleanup*) |
 | `cleanup_dry_run` | `false` | Log what cleanup would do without changing anything |
 | `cleanup_hide_after_hours` | `2` | Hours unseen before an unprotected device is hidden |

@@ -30,6 +30,7 @@ from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
 import bt_db
+import bt_people
 import bt_wifi
 
 logger = logging.getLogger("bt_newdevice")
@@ -271,6 +272,7 @@ def apply_role(conn: Any, mac: str, action: str, name: str | None = None) -> dic
     bt_db.update_device(
         conn, mac, friendly_name=clean, device_type=role["device_type"], role=role["role"],
         is_watchlisted=role["watch"], is_notify=role["notify"],
+        person=bt_people.person_from_name(clean),  # "Mathilde's iPhone" -> mathilde (None if no match)
     )
     record(conn, mac, "new", "named")
     return {"ok": True, "reason": "done", "device": bt_db.get_device(conn, mac)}

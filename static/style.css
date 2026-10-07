@@ -569,3 +569,23 @@ tbody tr:hover { background: var(--bg-hover); }
 }
 .cleanup-result { color: var(--green); font-size: 0.85rem; }
 .cleanup-result:empty { display: none; }
+
+/* Who's home */
+.people-strip {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    margin-bottom: 1rem;
+}
+.person-chip {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 0.3rem 0.8rem;
+    font-size: 0.9rem;
+}
+.person-home { border-color: var(--green); }
+.person-away { border-color: var(--red); }
+.person-no_phone { border-style: dashed; color: var(--text-dim); }
+.person-detail { color: var(--text-dim); font-size: 0.8rem; }
+
