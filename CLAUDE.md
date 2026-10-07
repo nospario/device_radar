@@ -33,7 +33,7 @@ Supporting modules:
 | `bt_calendar.py` | Apple Calendar (iCloud CalDAV) integration — event fetching, caching, and prompt context for proximity/welcome messages |
 | `bt_weather.py` | Current weather via Open-Meteo API — fetches temperature and conditions, caches in memory, provides formatted string for Alexa TTS prefix |
 | `bt_news.py` | BBC News RSS headline fetching, per-device read tracking, and spoken suffix formatting for Alexa TTS |
-| `bt_search.py` | Ollama chat with web search — tool-calling agent loop using Ollama's `/api/chat` endpoint with `web_search` and `web_fetch` cloud tools; provides sync and async entry points for the web assistant and Telegram bot |
+| `bt_search.py` | Ollama chat with web search — tool-calling agent loop using Ollama's `/api/chat` endpoint with `web_search` and `web_fetch` cloud tools; provides the async entry point used by the Telegram bot |
 
 *Note: a standalone "Kitkat" memory-agent app (port 8081, `/opt/kitkat/`) used to run alongside Device Radar. It was decommissioned on 2026-10-07 and removed from the Pi; the `kitkat_memories` table, `kitkat_*` config keys, nav link and design docs were removed from this repo.*
 
@@ -45,7 +45,7 @@ SQLite with WAL mode (`bt_radar.db`). Core tables:
 - **events** — arrival/departure event log with timestamps
 - **news_headlines** — fetched BBC RSS headlines with guid deduplication, feed_key, title, published timestamp
 - **news_read** — per-device read tracking (mac_address + headline_id), ensures headlines aren't repeated
-- **chat_history** — conversation history for Ollama context (Telegram bot uses numeric chat_id, web assistant uses `"web_assistant"`)
+- **chat_history** — conversation history for Ollama context (Telegram bot, keyed by numeric chat_id; entries older than 7 days are cleaned up on bot start)
 - **migrations** — tracks one-time data migrations
 
 Schema is created/migrated in `bt_db.init_db()`. New columns are added via `_add_column()`. One-time data migrations use `_run_migration()`.
@@ -177,7 +177,6 @@ Flask app on port 8080 with dark theme.
 - **Device Detail** (`/device/<mac>`) — info, settings (including Alexa voice selection), linking, event history, proximity Alexa config (BLE devices only), calendar selection, BBC News feed selection (all devices)
 - **History** (`/history`) — filterable paginated event log
 - **Pairing** (`/pairing`) — pair/unpair via web UI
-- **Assistant** (`/assistant`) — Ollama chat interface with "Read on Alexa" toggle, Echo device/voice selection, persistent conversation history
 ### Key API Endpoints
 - `GET /api/devices` — all devices (filters: state, watchlisted, hidden, scan_type, unmerged)
 - `GET /api/devices/present` — currently detected devices (merged)
@@ -190,10 +189,6 @@ Flask app on port 8080 with dark theme.
 - `POST /api/devices/<mac>/link` — link devices
 - `POST /api/devices/<mac>/pair` — initiate pairing
 - `POST /api/device/<id>/notifications` — toggle notifications
-- `GET /api/assistant/history` — web assistant conversation history
-- `POST /api/assistant/chat` — send message to Ollama, returns response (includes `searched` flag when web search was used)
-- `DELETE /api/assistant/history` — clear web assistant conversation
-- `POST /api/assistant/speak` — speak text on Alexa device
 
 ## Proximity Alerts
 
@@ -242,9 +237,9 @@ Config keys in `config.json`:
 
 ## Web Search
 
-Ollama assistant web search via Ollama's cloud search API. Module: `bt_search.py`.
+Telegram bot web search via Ollama's cloud search API. Module: `bt_search.py`.
 
-Both the web assistant (`bt_web.py`) and Telegram bot (`bt_telegram.py`) use `bt_search` for all Ollama chat interactions. The module uses Ollama's `/api/chat` endpoint (via the `ollama` Python library) with tool calling support. When web search is enabled, the model can autonomously decide to call `web_search` or `web_fetch` tools, which hit Ollama's cloud API at `ollama.com`. The model inference remains local.
+The Telegram bot (`bt_telegram.py`) uses `bt_search.chat_with_search_async()` for all Ollama chat interactions. (The web dashboard's Assistant page, which used a synchronous variant, was removed on 2026-10-07.) The module uses Ollama's `/api/chat` endpoint (via the `ollama` Python library) with tool calling support. When web search is enabled, the model can autonomously decide to call `web_search` or `web_fetch` tools, which hit Ollama's cloud API at `ollama.com`. The model inference remains local.
 
 Config keys in `config.json`:
 - `web_search_enabled` — toggle on/off (default: false)
@@ -342,7 +337,7 @@ Three services:
 - Dataclasses for structured data where appropriate
 - No global mutable state — encapsulate in classes or module-level caches
 - Single-file modules (each service is one .py file)
-- Tests live in `tests/` (stdlib `unittest`, temp databases); run `python3 -m unittest discover -s tests -v` before deploying changes to `bt_cleanup.py` or the schema
+- Tests live in `tests/` (stdlib `unittest`, temp databases); run `python3 -m unittest discover -s tests -v` before deploying (cleanup logic, schema, and web page/endpoint smoke tests; tests must never read the real `config.json` or touch the network)
 
 ## Dependencies
 
@@ -385,7 +380,7 @@ bt-monitor/
 ├── bt-web.service         # Systemd unit for web dashboard
 ├── bt-telegram.service    # Systemd unit for Telegram bot
 ├── tests/                 # unittest suite (python3 -m unittest discover -s tests)
-├── templates/             # Jinja2 templates (dashboard, device, history, pairing, assistant)
+├── templates/             # Jinja2 templates (dashboard, device, history, pairing, alexa)
 ├── static/                # CSS and JS (dark theme)
 └── README.md
 ```

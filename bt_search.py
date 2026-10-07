@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Ollama chat with web search — provides search-augmented chat via
-Ollama's tool calling API and cloud web search endpoints."""
+"""Ollama chat with web search — provides search-augmented chat (used by
+the Telegram bot) via Ollama's tool calling API and cloud web search
+endpoints."""
 
 from __future__ import annotations
 
@@ -185,27 +186,6 @@ def _build_generate_payload(
     return config.get("ollama_url", "http://localhost:11434"), payload
 
 
-def _fallback_generate_sync(
-    messages: list[dict[str, str]], config: dict[str, Any],
-) -> str | None:
-    """Synchronous chat via /api/generate (no tool calling)."""
-    base_url, payload = _build_generate_payload(messages, config)
-    timeout = config.get("ollama_timeout_seconds", 60)
-    try:
-        resp = httpx.post(
-            f"{base_url}/api/generate", json=payload, timeout=timeout,
-        )
-        resp.raise_for_status()
-        result = resp.json().get("response", "").strip()
-        return result or None
-    except httpx.TimeoutException:
-        logger.warning("Ollama timed out after %ds", timeout)
-        return None
-    except Exception as exc:
-        logger.error("Ollama error: %s", exc)
-        return None
-
-
 async def _fallback_generate_async(
     messages: list[dict[str, str]], config: dict[str, Any],
 ) -> str | None:
@@ -230,83 +210,6 @@ async def _fallback_generate_async(
 # ---------------------------------------------------------------------------
 # Chat with search (public API)
 # ---------------------------------------------------------------------------
-
-def chat_with_search_sync(
-    messages: list[dict[str, str]], config: dict[str, Any],
-) -> tuple[str | None, bool]:
-    """Synchronous chat with optional web search tool calling.
-
-    Returns ``(response_text, searched)`` where *searched* indicates
-    whether web search was invoked during the conversation.
-    """
-    if not _HAS_OLLAMA:
-        return _fallback_generate_sync(messages, config), False
-
-    host = config.get("ollama_url", "http://localhost:11434")
-    model = config.get("ollama_model", "qwen2.5:1.5b")
-    timeout = config.get("ollama_timeout_seconds", 60)
-    use_search = _search_enabled(config)
-
-    client = _ollama.Client(host=host, timeout=timeout)
-
-    chat_messages: list[Any] = [
-        {"role": m["role"], "content": m["content"]} for m in messages
-    ]
-    # Only activate tools when the query likely needs search — passing tools
-    # to every request dramatically slows down inference on CPU-only devices.
-    tools_active = use_search and _needs_search(chat_messages)
-    tools = [_web_search_fn, _web_fetch_fn] if tools_active else []
-    if tools_active:
-        chat_messages = _inject_search_instructions(chat_messages)
-    searched = False
-
-    try:
-        for _ in range(_MAX_TOOL_ITERATIONS):
-            kwargs: dict[str, Any] = {
-                "model": model, "messages": chat_messages,
-                "think": _use_thinking(config, tools_active=bool(tools)),
-            }
-            if tools:
-                kwargs["tools"] = tools
-
-            try:
-                response = client.chat(**kwargs)
-            except Exception as exc:
-                if tools and _is_tools_unsupported_error(exc):
-                    logger.warning(
-                        "Model %s does not support tools — retrying without search",
-                        model,
-                    )
-                    tools = []
-                    response = client.chat(
-                        model=model, messages=chat_messages,
-                        think=_use_thinking(config, tools_active=False),
-                    )
-                else:
-                    raise
-
-            chat_messages.append(response.message)
-
-            if response.message.tool_calls:
-                searched = True
-                for tc in response.message.tool_calls:
-                    logger.info(
-                        "Tool call: %s(%s)", tc.function.name, tc.function.arguments,
-                    )
-                    result = _execute_tool(tc)
-                    chat_messages.append({"role": "tool", "content": result})
-            else:
-                text = (response.message.content or "").strip()
-                return text or None, searched
-
-        # Exhausted iterations — return whatever we have
-        text = (response.message.content or "").strip()
-        return text or None, searched
-
-    except Exception as exc:
-        logger.error("Chat with search error: %s", exc)
-        return None, False
-
 
 async def chat_with_search_async(
     messages: list[dict[str, str]], config: dict[str, Any],
