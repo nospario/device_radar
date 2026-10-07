@@ -128,6 +128,33 @@ class TimelineTests(unittest.TestCase):
 
 
 @unittest.skipUnless(shutil.which("node"), "node is not installed")
+class ChartWidthTests(unittest.TestCase):
+    def viewbox_widths(self, client_width) -> list[int]:
+        import re
+        set_width = "" if client_width is None else f"document.getElementById('reports-root').clientWidth = {client_width}; "
+        root = js(set_width + "renderReports(data)", {"persons": [person()], "untracked": [], "generated_at": 1790000000})["root"]
+        return [int(w) for w in re.findall(r'viewBox="0 0 (\d+) \d+"', root)]
+
+    def test_charts_are_drawn_at_the_width_of_the_card(self) -> None:
+        # a 1000px container less the card's padding and border: both charts fit it exactly
+        self.assertEqual(self.viewbox_widths(1000), [962, 962])
+
+    def test_unknown_width_falls_back_to_a_default_size(self) -> None:
+        self.assertEqual(self.viewbox_widths(None), [782, 782])
+
+    def test_extreme_widths_are_clamped(self) -> None:
+        self.assertEqual(self.viewbox_widths(100), [300, 300])
+        self.assertEqual(self.viewbox_widths(9000), [1800, 1800])
+
+    def test_timeline_geometry_follows_the_width(self) -> None:
+        import re
+        svg = js("timelineSvg(data, 1000)", [day(home=[[0, 24]])])["result"]
+        self.assertIn('viewBox="0 0 1000 ', svg)
+        x, w = re.search(r'<rect class="home" x="([\d.]+)" y="[\d.]+" width="([\d.]+)"', svg).groups()
+        self.assertAlmostEqual(float(x) + float(w), 1000 - 8, places=1)
+
+
+@unittest.skipUnless(shutil.which("node"), "node is not installed")
 class DailyBarsTests(unittest.TestCase):
     def test_bars_scale_with_hours_and_partial_days_are_marked(self) -> None:
         import re

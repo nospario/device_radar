@@ -365,8 +365,8 @@ function hoursOutHtml(s) {
 }
 
 // One row per day, 0-24h across: green = at home, hatched grey = scanner was off, dim = still to come
-function timelineSvg(rows) {
-    const left = 54, width = 720, rowH = 15, gap = 4, top = 16;
+function timelineSvg(rows, total = 782) {
+    const left = 54, width = Math.max(200, total - 62), rowH = 15, gap = 4, top = 16;
     const height = top + rows.length * (rowH + gap) + 2;
     const x = h => left + (Math.max(0, Math.min(24, h)) / 24) * width;
     let svg = `<svg class="timeline-svg" viewBox="0 0 ${left + width + 8} ${height}" role="img" aria-label="Time at home, last ${rows.length} days">`;
@@ -388,8 +388,8 @@ function timelineSvg(rows) {
 }
 
 // Hours at home per day; faded bars are days the scanner only watched part of
-function dailyBarsSvg(rows) {
-    const width = 720, height = 90, base = 72, barW = width / rows.length;
+function dailyBarsSvg(rows, width = 720) {
+    const height = 90, base = 72, barW = width / Math.max(1, rows.length);
     let svg = `<svg class="bars-svg" viewBox="0 0 ${width} ${height}" role="img" aria-label="Hours at home per day">`;
     [0, 12, 24].forEach(h => {
         const y = base - (h / 24) * (base - 6);
@@ -425,7 +425,7 @@ function accuracyHtml(p) {
     return text + '.';
 }
 
-function personReportHtml(p) {
+function personReportHtml(p, chartW) {
     const q = p.quality || {};
     const reasons = (q.reasons || []).map(r => `<li>${escapeHtml(r)}</li>`).join('');
     const typical = p.typical || {};
@@ -447,10 +447,10 @@ function personReportHtml(p) {
         <div class="table-wrap"><table class="report-table"><thead><tr><th></th><th>Leaves</th><th>Gets home</th><th>Time out</th></tr></thead>
         <tbody>${row('Weekdays', typical.weekday || {})}${row('Weekends', typical.weekend || {})}</tbody></table></div>
         <h4>Last 14 days at home</h4>
-        ${timelineSvg(p.timeline || [])}
+        ${timelineSvg(p.timeline || [], chartW)}
         <p class="text-dim chart-note"><span class="swatch swatch-home"></span> at home <span class="swatch swatch-unknown"></span> scanner was off (unknown)</p>
         <h4>Hours at home per day (last 28 days)</h4>
-        ${dailyBarsSvg(p.daily || [])}
+        ${dailyBarsSvg(p.daily || [], chartW)}
         <p class="text-dim chart-note">Average on fully-watched days: weekdays ${avg('weekday')}, weekends ${avg('weekend')}. Faded bars are days the scanner was only on for part of the day.</p>
         <h4>Trend</h4>
         <p class="report-line">${trendHtml(p.trend)}</p>
@@ -479,7 +479,16 @@ function householdHtml(h, untracked) {
         <ul class="household-list">${line('Weekdays', h.weekday)}${line('Weekends', h.weekend)}</ul>${note}</article>`;
 }
 
+// Charts are drawn at the width of the card, so they fill it at 1:1 scale (text keeps its size)
+function chartWidth(root) {
+    const w = root && root.clientWidth ? root.clientWidth - 38 : 782;
+    return Math.max(300, Math.min(1800, Math.floor(w)));
+}
+
+let lastReport = null;
+
 function renderReports(report) {
+    lastReport = report;
     const root = document.getElementById('reports-root');
     const meta = document.getElementById('reports-meta');
     if (!root) return;
@@ -489,7 +498,8 @@ function renderReports(report) {
             ((report.untracked || []).length ? `<p class="text-dim">Known people without a phone: ${escapeHtml(report.untracked.join(', '))}.</p>` : '');
         return;
     }
-    root.innerHTML = report.persons.map(personReportHtml).join('') + householdHtml(report.household, report.untracked);
+    const chartW = chartWidth(root);
+    root.innerHTML = report.persons.map(p => personReportHtml(p, chartW)).join('') + householdHtml(report.household, report.untracked);
 }
 
 async function loadReports() {
@@ -504,6 +514,15 @@ async function loadReports() {
 
 function initReports() {
     loadReports();
+    let resizeTimer = null, lastWidth = 0;
+    window.addEventListener('resize', () => {
+        clearTimeout(resizeTimer);
+        resizeTimer = setTimeout(() => {
+            const root = document.getElementById('reports-root');
+            const w = root ? root.clientWidth : 0;
+            if (lastReport && w && Math.abs(w - lastWidth) > 8) { lastWidth = w; renderReports(lastReport); }
+        }, 200);
+    });
     setInterval(loadReports, 5 * 60 * 1000);
 }
 

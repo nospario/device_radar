@@ -643,7 +643,7 @@ tbody tr:hover { background: var(--bg-hover); }
 .q-usable { border-color: var(--yellow); color: var(--yellow); }
 .q-noisy { border-color: var(--red); color: var(--red); }
 .q-insufficient { color: var(--text-dim); border-style: dashed; }
-.timeline-svg, .bars-svg { width: 100%; height: auto; max-width: 780px; display: block; }
+.timeline-svg, .bars-svg { width: 100%; height: auto; display: block; }
 .timeline-svg .track { fill: var(--bg-hover); }
 .timeline-svg .home { fill: var(--green); }
 .timeline-svg .unknown { fill: var(--text-dim); opacity: 0.35; }
