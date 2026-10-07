@@ -90,8 +90,10 @@ function getColumnFilters() {
 
 // Text the Name filter searches: the displayed name plus IP address and
 // manufacturer, so a device can be found by "192.168.1.158" or "tp-link".
+// Linked devices are merged into one row, so their IP addresses count too.
 function nameSearchText(d) {
-    return [d.friendly_name || d.advertised_name || '(unknown)', d.ip_address, d.manufacturer]
+    const linkedIps = (d.linked_devices || []).map(l => l.ip_address);
+    return [d.friendly_name || d.advertised_name || '(unknown)', d.ip_address, ...linkedIps, d.manufacturer]
         .filter(Boolean).join(' ').toLowerCase();
 }
 

@@ -36,6 +36,8 @@ DEVICES = [
     {"mac_address": "B", "friendly_name": "Dryer", "advertised_name": "HS100.lan",
      "ip_address": "192.168.1.198", "manufacturer": "TP-Link"},
     {"mac_address": "C", "advertised_name": None, "ip_address": None, "manufacturer": "Apple"},
+    {"mac_address": "D", "friendly_name": "HP ENVY Printer", "ip_address": None, "manufacturer": None,
+     "linked_devices": [{"mac_address": "D2", "ip_address": "192.168.1.109"}]},
 ]
 
 
@@ -50,7 +52,7 @@ class NameFilterTests(unittest.TestCase):
         return json.loads(result.stdout)
 
     def test_empty_filter_matches_everything(self) -> None:
-        self.assertEqual(self.search(""), ["A", "B", "C"])
+        self.assertEqual(self.search(""), ["A", "B", "C", "D"])
 
     def test_matches_displayed_name(self) -> None:
         self.assertEqual(self.search("iphone"), ["A"])
@@ -59,6 +61,10 @@ class NameFilterTests(unittest.TestCase):
     def test_matches_ip_address(self) -> None:
         self.assertEqual(self.search("192.168.1.158"), ["A"])
         self.assertEqual(self.search("192.168.1.19"), ["B"])
+
+    def test_matches_ip_of_a_linked_device(self) -> None:
+        # Linked devices are merged into one row whose own IP may be empty.
+        self.assertEqual(self.search("192.168.1.109"), ["D"])
 
     def test_matches_manufacturer(self) -> None:
         self.assertEqual(self.search("tp-link"), ["B"])
