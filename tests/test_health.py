@@ -14,6 +14,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import bt_backup  # noqa: E402
 import bt_cleanup  # noqa: E402
 import bt_db  # noqa: E402
 import bt_health as bh  # noqa: E402
@@ -41,6 +42,12 @@ class Db(unittest.TestCase):
         bt_db.init_db(self.db)
         self.conn = bt_db.get_connection(self.db)
         self.addCleanup(self.conn.close)
+        # a temporary "external drive": tests must never look at the real /mnt/external
+        self.external = Path(self.tmp.name) / "external"
+        self.config = {"health_external_path": str(self.external)}
+
+    def fresh_backup(self, now=NOW):
+        bt_backup.make_backup(self.db, self.external / bt_backup.DIR_NAME, None, now - 3600)
 
     def device(self, mac, name, *, state="DETECTED", last_seen=NOW - 30, always_on=1, ip="192.168.1.9", **cols):
         bt_db.upsert_device(self.conn, mac, advertised_name=name, scan_type="WiFi", state=state, ip_address=ip)
@@ -164,6 +171,31 @@ class SimpleCheckTests(Db):
         self.assertEqual((c.status, c.confirm), (bh.FAIL, 1))
 
 
+class BackupCheckTests(Db):
+    def check(self, now=NOW, mounted=True, config=None):
+        return bh.check_backup({**self.config, **(config or {})}, lambda p: mounted, now)
+
+    def test_disabled_means_no_check(self) -> None:
+        self.assertIsNone(self.check(config={"backup_enabled": False}))
+
+    def test_drive_not_mounted(self) -> None:
+        c = self.check(mounted=False)
+        self.assertEqual((c.status, c.confirm), (bh.WARN, 3))
+        self.assertIn("not mounted", c.message)
+
+    def test_no_backup_yet(self) -> None:
+        self.assertEqual(self.check().message, "no backup has been made yet")
+
+    def test_age_thresholds(self) -> None:
+        self.fresh_backup(NOW)                      # made one hour before NOW
+        c = self.check(NOW)
+        self.assertEqual(c.status, bh.OK)
+        self.assertIn("60 min ago", c.message)
+        self.assertEqual(self.check(NOW + 30 * HOUR).status, bh.OK)       # 31 h old
+        self.assertEqual(self.check(NOW + 40 * HOUR).status, bh.WARN)     # 41 h old
+        self.assertEqual(self.check(NOW + 80 * HOUR).status, bh.FAIL)     # 81 h old
+
+
 class AlwaysOnTests(Db):
     def test_online_and_recently_seen_devices_are_ok(self) -> None:
         self.device("AA:00:00:00:00:01", "Doorbell")
@@ -271,11 +303,15 @@ class StateMachineTests(Db):
 
 
 class RunOnceTests(Db):
+    def setUp(self) -> None:
+        super().setUp()
+        self.fresh_backup()
+
     def run_once(self, config=None, send=None, environment=None, now=NOW, scanner_alive=True):
         if scanner_alive:
             self.heartbeat(now - 10)   # a running scanner keeps touching its heartbeat as simulated time moves on
         send = send or mock.AsyncMock(return_value=True)
-        lines = asyncio.run(bh.run_once(self.db, config or {}, send, environment or env(), now))
+        lines = asyncio.run(bh.run_once(self.db, {**self.config, **(config or {})}, send, environment or env(), now))
         return lines, send
 
     def test_a_healthy_pi_sends_nothing_and_records_results(self) -> None:

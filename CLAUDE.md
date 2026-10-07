@@ -329,11 +329,24 @@ Module: `bt_newdevice.py`. When the WiFi scan finds a MAC that was never stored,
 
 `bt_wifi.lookup_oui_vendor()` reads the full IEEE registry (`/usr/share/ieee-data/oui.txt`, apt package **`ieee-data`**, ~35,800 vendors, loaded once on first use) and falls back to the short built-in `OUI_VENDORS` table if the file is missing. A **locally administered** address (bit 0x02 of the first octet, `bt_wifi.is_private_mac`) is a private/randomised WiFi address and has no vendor; the dashboard shows "Private address" in the Manufacturer column for WiFi-only devices (`manufacturerLabel` in `static/app.js`, searchable). The locally administered test is meaningful for WiFi/Ethernet MACs only, not for Bluetooth LE random addresses. Vendor names are filled in on the next WiFi scan.
 
+## Backups
+
+Module: `bt_backup.py`. Nightly copy of the database (and `config.json`) to `<external drive>/device-radar-backups/` (default `/mnt/external`, `health_external_path`). Runs as a loop in the **Telegram bot process** (next to the health watchdog; checks every 10 min, first look 2 min after start).
+
+- **How:** SQLite's online backup API (a consistent snapshot while the scanner keeps writing), written under a `.partial` name, verified (`PRAGMA integrity_check` + the `devices` table must exist), then renamed into place. The copy is converted to a plain single-file database (`journal_mode=DELETE`) so it has no `-wal`/`-shm` side files. The secrets file (`.device-radar.env`) is never copied.
+- **When:** the first backup ever runs straight away; after that once per calendar day at/after `backup_hour:backup_minute` (03:30). If the Pi was off at that time, it catches up at the first opportunity (`is_due`). Skipped (with a warning) if the drive is not mounted. One sequential write a night suits the spinning USB disk.
+- **Retention** (`prune`): the newest backup of each of the last `backup_keep_daily` (7) days that have one, plus the newest of each of the last `backup_keep_weekly` (4) ISO weeks; the matching `config-*.json` goes with it. With fewer than 7 days of history nothing is deleted, so an old backup is kept until newer ones push it out. Unrelated files in the folder are never touched.
+- **Health:** the watchdog's "Database backup" check warns after 36 h without a backup and fails after 72 h (needs 3 consecutive passes), and warns if the drive is not mounted.
+- **CLI** (run from the project directory as root): `python3 bt_backup.py` (back up now), `--list`, `--verify` (opens every backup and runs `integrity_check`).
+- **Restore:** `sudo systemctl stop bt-scanner bt-web bt-telegram`, copy a `bt_radar-*.db` over `/opt/bt-monitor/bt_radar.db`, delete `bt_radar.db-wal` / `bt_radar.db-shm` beside it, start the services.
+- **Config keys** (optional): `backup_enabled` (true), `backup_hour` (3), `backup_minute` (30), `backup_keep_daily` (7), `backup_keep_weekly` (4).
+- The backups are **not encrypted** and hold your household's device history, so treat the drive accordingly.
+
 ## Health Watchdog
 
 Module: `bt_health.py`. A loop in the **Telegram bot process** (`bt-telegram`, started in `_post_init`, first pass 45 s after start) runs the checks every `health_interval_seconds` (300) and stores the latest result of each in `health_results`; alert bookkeeping is in `health_state`. It lives in the bot process, not the scanner, so it still reports if the scanner dies.
 
-**Checks:** scanner heartbeat (`scanner_state`; warn after 3 min, fail after 10), systemd services (`health_services`; default bt-scanner, bt-web, bt-telegram, pihole-FTL, ollama, obsidian-sync, nftables, ssh), Ollama API, **calendar login** (`bt_calendar.check_login`, every 6 h; a rejected login fails immediately, being unreachable only warns), disk space of `/` and the external drive (warn 85%, fail 95%), external drive mounted, CPU temperature (warn 80 °C, fail 85) and throttling/under-voltage *right now*, clock sync, reboot required, pending updates (`apt-get -s upgrade`, daily, warn at 50), database `PRAGMA quick_check` (daily), and **always-on devices**.
+**Checks:** scanner heartbeat (`scanner_state`; warn after 3 min, fail after 10), nightly **backup** freshness (see *Backups*), systemd services (`health_services`; default bt-scanner, bt-web, bt-telegram, pihole-FTL, ollama, obsidian-sync, nftables, ssh), Ollama API, **calendar login** (`bt_calendar.check_login`, every 6 h; a rejected login fails immediately, being unreachable only warns), disk space of `/` and the external drive (warn 85%, fail 95%), external drive mounted, CPU temperature (warn 80 °C, fail 85) and throttling/under-voltage *right now*, clock sync, reboot required, pending updates (`apt-get -s upgrade`, daily, warn at 50), database `PRAGMA quick_check` (daily), and **always-on devices**.
 
 **Always-on devices** (`devices.always_on`, "Always on" checkbox on the device page): a device is reported offline when it is not `DETECTED` and has not been seen for `health_offline_minutes` (20) of **scanner running time** (`bt_cleanup.running_cutoff`, same rule as the cleanup), so a scanner restart or a powered-off Pi never makes everything look offline.
 
@@ -416,6 +429,7 @@ bt-monitor/
 ├── bt_newdevice.py        # New WiFi device alerts + tap-to-name from Telegram
 ├── bt_people.py           # People, device roles, phone-only alerts, who's home
 ├── bt_health.py           # Health watchdog: checks, quiet alerting, always-on devices, restart message
+├── bt_backup.py           # Nightly database backup to the external drive (verify, retention, CLI)
 ├── bt_alexa.py            # Alexa TTS, welcome greetings, encouragement, proximity alerts
 ├── bt_classify.py         # Device classification logic
 ├── bt_pair.py             # Bluetooth pairing helper

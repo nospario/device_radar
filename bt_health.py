@@ -6,7 +6,7 @@ report, when the scanner itself has died) and stores the latest result of every
 check in ``health_results`` for the dashboard and ``/status``.
 
 Checks: scanner heartbeat, systemd services, Ollama, calendar login (iCloud),
-disk space (SD card and external drive), CPU temperature and throttling,
+nightly backup freshness, disk space (SD card and external drive), CPU temperature and throttling,
 pending updates and reboot, clock sync, database integrity, and **always-on
 devices** (doorbell, camera, hub, ...) that have been offline too long.
 
@@ -36,6 +36,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
+import bt_backup
 import bt_cleanup
 import bt_db
 
@@ -245,6 +246,27 @@ def check_database(conn: sqlite3.Connection) -> Check:
     return Check("database", "Database", FAIL, f"integrity check failed: {result}", confirm=1, slow="database")
 
 
+def check_backup(config: dict[str, Any], ismount: Callable[[str], bool], now: float) -> Check | None:
+    """The nightly database backup should be recent (see bt_backup)."""
+    settings = bt_backup.load_settings(config)
+    if not settings.enabled:
+        return None
+    key, label = "backup", "Database backup"
+    if not ismount(settings.external_path):
+        return Check(key, label, WARN, "the external drive is not mounted, so no backups can be made", confirm=3)
+    newest = bt_backup.latest(settings.directory)
+    if newest is None:
+        return Check(key, label, WARN, "no backup has been made yet", confirm=3)
+    when, _path, size = newest
+    age = now - when.timestamp()
+    message = f"last backup {_ago(age)} ago ({size / 1e6:.1f} MB)"
+    if age > 72 * 3600:
+        return Check(key, label, FAIL, message, confirm=3)
+    if age > 36 * 3600:
+        return Check(key, label, WARN, message, confirm=3)
+    return Check(key, label, OK, message)
+
+
 def check_always_on(conn: sqlite3.Connection, now: float, minutes: float) -> list[Check]:
     """Devices flagged 'always on' that have been offline longer than ``minutes`` of running time.
 
@@ -397,7 +419,8 @@ def collect(conn: sqlite3.Connection, config: dict[str, Any], settings: Settings
         if ext:
             checks.append(ext)
     for chk in (check_temperature(env.read_temp, settings.temp_warn, settings.temp_fail),
-                check_throttling(env.run), check_time_sync(env.run), check_reboot(env.exists)):
+                check_throttling(env.run), check_time_sync(env.run), check_reboot(env.exists),
+                check_backup(config, env.ismount, now)):
         if chk:
             checks.append(chk)
     checks += check_always_on(conn, now, settings.offline_minutes)

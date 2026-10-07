@@ -16,6 +16,7 @@ from typing import Any
 
 import httpx
 
+import bt_backup
 import bt_db
 import bt_health
 import bt_newdevice
@@ -1364,6 +1365,10 @@ def main() -> None:
         # The health watchdog lives in this process so it can still report if the scanner dies
         application.bot_data["health_task"] = asyncio.create_task(
             bt_health.run_loop(_get_db_path(), load_config, send_message),
+        )
+        # ...and so does the nightly database backup to the external drive
+        application.bot_data["backup_task"] = asyncio.create_task(
+            bt_backup.run_loop(_get_db_path(), bt_backup.CONFIG_PATH, load_config),
         )
 
         await application.bot.set_my_commands([
