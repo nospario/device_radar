@@ -617,12 +617,12 @@ tbody tr:hover { background: var(--bg-hover); }
     overflow-x: auto;
     font-size: 0.85rem;
 }
-.nav-form { display: inline; margin: 0; }
+.nav-form { display: flex; align-items: center; margin: 0; }
 .nav-button {
-    background: none; border: none; color: var(--accent); cursor: pointer;
-    font: inherit; padding: 0;
+    background: none; border: none; color: var(--text-dim); cursor: pointer;
+    font: inherit; font-size: 0.9rem; padding: 0.25rem 0.5rem; border-radius: 4px;
 }
-.nav-button:hover { text-decoration: underline; }
+.nav-button:hover { color: var(--text); background: var(--bg-hover); }
 
 /* Reports */
 .reports-root { display: grid; gap: 1.25rem; }
