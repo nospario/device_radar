@@ -25,6 +25,7 @@ import bt_health
 import bt_news
 import bt_pair
 import bt_people
+import bt_presence
 
 logger = logging.getLogger("bt_web")
 
@@ -242,6 +243,11 @@ def device_detail(mac: str):
     )
 
 
+@app.route("/reports")
+def reports():
+    return render_template("reports.html", active="reports")
+
+
 @app.route("/history")
 def history():
     return render_template("history.html", active="history")
@@ -418,10 +424,29 @@ def api_people():
     """Home/away for each person, decided by their phone (see bt_people)."""
     conn = get_conn()
     try:
-        people = bt_people.people_status(conn, load_config())
+        config = load_config()
+        people = bt_people.people_status(conn, config)
+        try:                                   # a problem in the analytics must never break the strip
+            predictions = bt_presence.eta_for_people(conn, config)
+        except Exception:  # noqa: BLE001
+            logger.error("Could not compute arrival predictions", exc_info=True)
+            predictions = {}
     finally:
         conn.close()
+    for person in people:
+        if person["person"] in predictions:
+            person["prediction"] = predictions[person["person"]]
     return jsonify(people)
+
+
+@app.route("/api/reports")
+def api_reports():
+    """Presence reports, trends and predictions (see bt_presence)."""
+    conn = get_conn()
+    try:
+        return jsonify(bt_presence.build_report(conn, load_config()))
+    finally:
+        conn.close()
 
 
 @app.route("/api/stats")

@@ -159,6 +159,26 @@ def people_status(conn: Any, config: dict[str, Any], now: float | None = None) -
     return result
 
 
+def phone_groups(conn: Any, config: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
+    """Each person with a tracked phone -> their phone records plus the records linked to them.
+
+    This is the set of devices whose arrivals and departures decide whether the person is home.
+    """
+    devices = _rows(conn)
+    by_link: dict[str, list[dict[str, Any]]] = {}
+    for dev in devices:
+        if dev.get("linked_to"):
+            by_link.setdefault(dev["linked_to"], []).append(dev)
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for person in _person_keys(config, devices):
+        roots = [d for d in devices if effective_person(d) == person and effective_role(d) == PHONE
+                 and not d.get("linked_to")]
+        members = [m for root in roots for m in [root] + by_link.get(root["mac_address"], [])]
+        if members:
+            groups[person] = members
+    return groups
+
+
 def person_entry(conn: Any, config: dict[str, Any], name: str) -> dict[str, Any] | None:
     """The people_status entry for a typed name like 'laura', or None if not a known person."""
     key = normalise_person(name)

@@ -105,6 +105,7 @@ The Telegram bot (`bt_telegram.py`) provides interactive presence queries and ge
 | Command | Description |
 |---|---|
 | `/home` | Quick summary of who's detected |
+| `/eta` | When people who are out are expected home (or `/eta lilou`); you can also just ask "when will Lilou be home?" |
 | `/unnamed` | List connected WiFi devices that have no name, with buttons to name them |
 | `/devices` | List all watchlisted devices with status |
 | `/lastseen <name>` | When a device was last seen |
@@ -189,6 +190,8 @@ Edit `config.json` in the same directory as the scripts:
 | `rssi_threshold` | `-85` | Minimum signal strength (dBm); weaker signals are ignored |
 | `db_path` | `bt_radar.db` | Path to the SQLite database file |
 | `web_port` | `8080` | Port for the web dashboard |
+| `late_alerts_enabled` / `late_alerts_people` | `false` / `[]` | Opt-in Telegram alert when a listed person is later home than any similar day (see CLAUDE.md, *Presence Reports and Predictions*) |
+| `presence_flap_minutes` | `20` | Absences shorter than this (45 for Bluetooth phones) are treated as signal flicker in reports |
 | `health_check_web_password` | `true` | Warn (in the dashboard health panel and Telegram) while no dashboard password is set |
 | `backup_enabled` | `true` | Nightly database backup to `<external drive>/device-radar-backups` (7 daily + 4 weekly kept; see CLAUDE.md, *Backups*) |
 | `backup_hour` / `backup_minute` | `3` / `30` | Time of the nightly backup (catches up if the Pi was off) |

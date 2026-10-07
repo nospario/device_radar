@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block title %}Reports - Device Radar{% endblock %}
+
+{% block content %}
+<div class="section">
+    <div class="section-header">
+        <h2>Presence reports</h2>
+        <div class="text-dim" id="reports-meta"></div>
+    </div>
+    <p class="text-dim">Built from each person's phone: when they leave and get home, how long they are out, and when they are
+    likely to be back. Short flickers of the signal are merged, and any time the scanner was switched off is left out. Every
+    figure says how many days it is based on, and predictions only appear once there is enough history.</p>
+    <div id="reports-root" class="reports-root"><p class="loading">Loading...</p></div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    initReports();
+</script>
+{% endblock %}

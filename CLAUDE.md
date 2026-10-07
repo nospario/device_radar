@@ -47,6 +47,7 @@ SQLite with WAL mode (`bt_radar.db`). Core tables:
 - **news_read** — per-device read tracking (mac_address + headline_id), ensures headlines aren't repeated
 - **chat_history** — conversation history for Ollama context (Telegram bot, keyed by numeric chat_id; entries older than 7 days are cleaned up on bot start)
 - **health_results** / **health_state** — latest result of each health check, and what has already been alerted (see *Health Watchdog*)
+- **late_alerts** — which absence has already produced a "later than usual" alert (see *Presence Reports and Predictions*)
 - **device_alerts** — which MACs have been announced as new (`kind` 'new') or deleted by the cleanup (`kind` 'forgotten'), see *New Device Alerts*
 - **scanner_state** / **scanner_gaps** — scanner heartbeat and recorded downtime periods (used by the cleanup, see *Device Cleanup*)
 - **migrations** — tracks one-time data migrations
@@ -97,6 +98,23 @@ Module: `bt_people.py`. Home/away for a **person** is decided by their **phone**
 - **Surfaces**: dashboard "who's home" strip (`/api/people`, `renderPeople` in `static/app.js`); Telegram "who's home" and `/home` answer **by person** (`format_people_summary`); "is Laura home?" answers from the person's phone (`bt_people.best_phone`) and, if none is tracked, says so (`no_phone_message`) instead of falling back to a laptop; `GET /api/devices` adds `effective_role` / `effective_person`; `PATCH /api/devices/<mac>` accepts `role` (validated) and `person` (sanitised).
 - **Config-seeded devices**: `devices` in config.json (MAC -> name) are re-created and set watched + notify on **every scanner start** (`bt_scanner.migrate_config_devices`), so deleting such a record in the database does not stick. Remove its entry from config.json as well (done for an old phone on 7 Oct 2026).
 
+## Presence Reports and Predictions
+
+Module: `bt_presence.py`; page `/reports` (open to view, no login needed), `GET /api/reports`, a prediction on each dashboard "who's home" chip (`GET /api/people` adds `prediction`), Telegram questions and `/eta`. Built only from the phone events already recorded (see *People and Roles*): a person's phone records plus their linked records.
+
+- **Sessions** (`build_sessions`): arrive/depart events of all the person's phone records are united into home periods, and absences shorter than `presence_flap_minutes` (20; 45 when any Bluetooth record is involved, `presence_flap_minutes_bluetooth`) are treated as signal flicker and merged (on the first real data 65-91% of raw events were flicker). A session is flagged unreliable if the scanner was off during it (`spans_gap`) or it began within 15 minutes of a restart (`start_ok`), because the scanner only learned of the arrival/departure then.
+- **Outings** (`outings_from_sessions`): reliable absences of at least `presence_min_outing_minutes` (60) between two sessions, never overlapping scanner downtime (`scanner_gaps`, see *Device Cleanup*). Every statistic uses outings only.
+- **Time of day** is measured on a day that starts at 04:00 local (`shifted`), so a 00:30 return belongs to the evening before and counts as a weekday/weekend by that evening.
+- **Reports** (`build_report`): typical leave / return / time out, weekday vs weekend (median, middle half, n; "not enough data" below `presence_min_samples` = 8); hours at home per day counting only observed time (days the scanner watched less than 80% are marked partial); a 14-day timeline (green home, hatched = scanner off); when the house is empty (tracked phones only, finished periods, only since someone was first tracked); a weekday-return trend (last 28 days vs the 28 before, bootstrap 80% interval on the median difference; reported as a trend only if the interval excludes zero); data quality.
+- **Data quality** (`quality`): `insufficient` (< 8 usable outings), `noisy`, `usable`, `good`. **`noisy` (more than 4 home periods a day, 85%+ flicker, or weekday return times spread over more than 8 hours) means no predictions are made for that person**; the page says why. A Bluetooth-only phone gets advice to link its WiFi record. Observed on the first run: Lilou and Mathilde (WiFi) good/usable; Richard (Bluetooth flicker, phone going quiet overnight) noisy.
+- **Predictions** (`predict_return`, `predict_leave`): from outings of the same day type (weekday/weekend) in the last `presence_history_days` (180), each weighted by recency (`presence_halflife_days` 42). Only return times still ahead of *now* are considered ("not back by 17:30" shifts the estimate later); if almost none remain the person is `overdue` ("later than usual"). Two methods: `time_of_day` (usual return time) and `duration` (leave time + the length of outings that began at a similar time, within 1.5 h); each person gets whichever had the smaller median error in a **walk-forward backtest** (`choose_method`: every past outing predicted from only the outings before it; the page shows the 80%-window hit rate and the error against the naive "guess the usual time"). Statuses: `ready` (median + 80% window + n), `overdue`, `insufficient`, `long_away` (gone more than `presence_long_away_hours`, 18), `unknown` (the scanner was off after they left), `unreliable` (noisy data). Plain statistics, not machine learning: a few dozen samples per person do not support more.
+- **Caching:** sessions are rebuilt only when that person's events or the scanner downtime change; the backtest is cached by the outings themselves (not by event count), so Bluetooth flicker that merges away does not re-run it.
+- **Telegram:** "when will Lilou be home?", "when does Lilou usually get home / leave?" and `/eta [name]` (everyone who is out). Never answers from noisy data; says so when there is not enough history or the scanner was off.
+- **Late alerts (opt-in, off by default):** `late_alerts_enabled` true **and** names in `late_alerts_people` (e.g. `["lilou"]`); sends one Telegram message per absence when the person is later than any similar day plus `late_alerts_margin_minutes` (30); never from noisy data or after scanner downtime; `late_alerts_dry_run` logs only. Table `late_alerts`.
+- **Config keys** (optional): `presence_flap_minutes`, `presence_flap_minutes_bluetooth`, `presence_min_outing_minutes`, `presence_min_samples`, `presence_halflife_days`, `presence_history_days`, `presence_long_away_hours`, `late_alerts_enabled`, `late_alerts_people`, `late_alerts_margin_minutes`, `late_alerts_dry_run`.
+- **Needs a continuously running Pi:** from March to October 2026 the scanner ran for only about 70 of 218 days. Predictions become useful after roughly 4 weeks of continuous running. Only watched devices record events, so a phone's WiFi twin must be watched for its events to count.
+- The page reveals when the house is empty. It is deliberately open to view like the rest of the dashboard (owner's decision); to protect it, add `/reports` and `/api/reports` to the login guard.
+
 ## Device Linking
 
 Devices can appear with different MACs across scan types (BLE vs WiFi). The `linked_to` column creates groups with one primary and N secondaries. Group-aware behaviour:
@@ -119,7 +137,7 @@ Devices can appear with different MACs across scan types (BLE vs WiFi). The `lin
 - **Presence queries** — intent-routed via regex patterns (no LLM needed):
   - "who's home", "is anyone home", "is Richard home", "where is Laura"
   - "when did Richard arrive", "how long has Laura been away"
-  - `/home`, `/devices`, `/lastseen <name>`, `/unnamed` slash commands
+  - `/home`, `/devices`, `/lastseen <name>`, `/unnamed`, `/eta [name]` slash commands, and questions such as "when will Lilou be home?"
 - **Person resolution** — maps names to devices via `person_aliases` config, then fuzzy-matches `friendly_name`, then resolves link groups
 - **General chat** — forwarded to local Ollama instance (configurable model, default `gemma3:4b`); emoji suppressed via system prompt
 - **Conversation history** — stored in `chat_history` SQLite table, last N messages sent as context
@@ -190,6 +208,7 @@ Flask app on port 8080 with dark theme, served by waitress. Reads are open; chan
 
 ### Pages
 - **Dashboard** (`/`) — "who's home" strip (one chip per person, decided by phones), health panel, live device list with stats, per-column filters (the Name filter also matches IP address and manufacturer), watchlist/notify toggles, and a Housekeeping panel (stale-record counts and a "Clean up now" button)
+- **Reports** (`/reports`) — per person: typical times, 14-day timeline, hours at home, trend, arrival predictions with their measured accuracy and data quality; plus when the house is empty
 - **Device Detail** (`/device/<mac>`) — info, settings (including Alexa voice selection), linking, event history, proximity Alexa config (BLE devices only), calendar selection, BBC News feed selection (all devices)
 - **History** (`/history`) — filterable paginated event log
 - **Pairing** (`/pairing`) — pair/unpair via web UI
@@ -202,6 +221,7 @@ Flask app on port 8080 with dark theme, served by waitress. Reads are open; chan
 - `GET /api/stats` — dashboard counters
 - `GET /api/people` — home/away per person, decided by phones (see *People and Roles*)
 - `GET /api/health` — latest health watchdog results (see *Health Watchdog*)
+- `GET /api/reports` — presence reports, trends and predictions (see *Presence Reports and Predictions*)
 - `GET /api/cleanup/preview` — what a cleanup would do (total, protected, to_delete, to_hide, DB size, settings); changes nothing
 - `POST /api/cleanup/run` — hide + delete stale devices now (body `{"dry_run": bool}`; real run backs up first, ignores the per-run cap, compacts the DB)
 - `POST /api/devices/<mac>/link` — link devices
@@ -441,6 +461,7 @@ bt-monitor/
 ├── bt_cleanup.py          # Stale device cleanup (hide/delete, protection rules, backup, CLI)
 ├── bt_newdevice.py        # New WiFi device alerts + tap-to-name from Telegram
 ├── bt_people.py           # People, device roles, phone-only alerts, who's home
+├── bt_presence.py         # Presence analytics: sessions, reports, trends, arrival predictions, late alerts
 ├── bt_health.py           # Health watchdog: checks, quiet alerting, always-on devices, restart message
 ├── bt_backup.py           # Nightly database backup to the external drive (verify, retention, CLI)
 ├── bt_auth.py             # Dashboard password (scrypt hash, cookie secret, login throttle, CLI)

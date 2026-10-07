@@ -624,3 +624,39 @@ tbody tr:hover { background: var(--bg-hover); }
 }
 .nav-button:hover { text-decoration: underline; }
 
+/* Reports */
+.reports-root { display: grid; gap: 1.25rem; }
+.report-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 1rem 1.1rem;
+}
+.report-card h4 { margin: 1rem 0 0.35rem; font-size: 0.95rem; }
+.report-head { display: flex; justify-content: space-between; align-items: center; gap: 0.75rem; }
+.report-line { margin: 0.35rem 0; }
+.report-table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+.report-table th, .report-table td { text-align: left; padding: 0.3rem 0.5rem; border-bottom: 1px solid var(--border); vertical-align: top; }
+.report-table thead th { color: var(--text-dim); font-weight: 500; }
+.q-badge { font-size: 0.75rem; padding: 0.15rem 0.6rem; border-radius: 999px; border: 1px solid var(--border); text-transform: capitalize; }
+.q-good { border-color: var(--green); color: var(--green); }
+.q-usable { border-color: var(--yellow); color: var(--yellow); }
+.q-noisy { border-color: var(--red); color: var(--red); }
+.q-insufficient { color: var(--text-dim); border-style: dashed; }
+.timeline-svg, .bars-svg { width: 100%; height: auto; max-width: 780px; display: block; }
+.timeline-svg .track { fill: var(--bg-hover); }
+.timeline-svg .home { fill: var(--green); }
+.timeline-svg .unknown { fill: var(--text-dim); opacity: 0.35; }
+.timeline-svg .future { fill: var(--bg-card); opacity: 0.75; }
+.timeline-svg .gridline, .bars-svg .gridline { stroke: var(--border); stroke-width: 1; }
+.timeline-svg text, .bars-svg text { fill: var(--text-dim); font-size: 9px; }
+.bars-svg .bar { fill: var(--accent); }
+.bars-svg .bar.partial { fill: var(--text-dim); opacity: 0.5; }
+.chart-note { font-size: 0.8rem; margin-top: 0.3rem; }
+.swatch { display: inline-block; width: 0.8rem; height: 0.8rem; border-radius: 2px; vertical-align: middle; margin: 0 0.25rem 0 0.6rem; }
+.swatch-home { background: var(--green); }
+.swatch-unknown { background: var(--text-dim); opacity: 0.45; }
+.quality-details { margin-top: 0.9rem; font-size: 0.9rem; }
+.quality-details summary { cursor: pointer; color: var(--text-dim); }
+.quality-reasons, .household-list { margin: 0.4rem 0 0.2rem 1.2rem; }
+

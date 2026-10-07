@@ -79,6 +79,15 @@ def ensure_health_tables(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def ensure_presence_tables(conn: sqlite3.Connection) -> None:
+    """``late_alerts`` remembers which absence has already produced a "later than usual" alert."""
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS late_alerts ("
+        "person TEXT PRIMARY KEY, leave_ts REAL NOT NULL, alerted_at REAL NOT NULL)"
+    )
+    conn.commit()
+
+
 def _run_migration(conn: sqlite3.Connection, name: str, sql: str) -> None:
     """Run a SQL statement once, tracked by name in the migrations table."""
     if conn.execute("SELECT 1 FROM migrations WHERE name = ?", (name,)).fetchone():
@@ -209,6 +218,7 @@ def init_db(db_path: str | Path = DEFAULT_DB_PATH) -> None:
     ensure_scanner_tables(conn)
     ensure_alert_tables(conn)
     ensure_health_tables(conn)
+    ensure_presence_tables(conn)
     _add_column(conn, "devices", "always_on", "INTEGER DEFAULT 0")
     _add_column(conn, "devices", "role", "TEXT")
     _add_column(conn, "devices", "person", "TEXT")

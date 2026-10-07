@@ -21,6 +21,7 @@ import bt_db
 import bt_health
 import bt_newdevice
 import bt_people
+import bt_presence
 import bt_search
 import bt_tasks
 
@@ -142,6 +143,8 @@ _PRESENCE_PATTERNS = [
     re.compile(r"\bis\s+\w+\s+(home|in|here|present|around)\b", re.I),
     re.compile(r"\bwhere\s+is\s+\w+\b", re.I),
     re.compile(r"\bwhen\s+did\s+\w+\s+(arrive|leave|depart|get\s+home|come\s+home|go)\b", re.I),
+    re.compile(r"\bwhen\s+(will|is|does|would|should)\s+\w+\s+(be\s+)?(usually\s+|normally\s+|typically\s+)?"
+               r"(home|back|arrive|get\s+home|come\s+home|leave|go\s+out|head\s+out)\b", re.I),
     re.compile(r"\bhow\s+long\s+has\s+\w+\s+been\s+(home|away|out|gone|here)\b", re.I),
     re.compile(r"\bwhat\s+devices?\s+(are|is)\s+(home|present|connected|detected)\b", re.I),
     re.compile(r"\blast\s+seen\b", re.I),
@@ -207,6 +210,7 @@ def _extract_person(text: str) -> str | None:
     patterns = [
         re.compile(r"\bis\s+(\w+)\s+(home|in|here|present|around)\b", re.I),
         re.compile(r"\bwhere\s+is\s+(\w+)\b", re.I),
+        re.compile(r"\bwhen\s+(?:will|is|does|would|should)\s+(\w+)\b", re.I),
         re.compile(r"\bwhen\s+did\s+(\w+)\s+", re.I),
         re.compile(r"\bhow\s+long\s+has\s+(\w+)\s+been\b", re.I),
         re.compile(r"\blast\s+seen\s+(\w+)\b", re.I),
@@ -277,8 +281,38 @@ def _time_ago(ts: float | None) -> str:
     return f"{int(diff / 86400)}d ago"
 
 
+def predictive_answer(conn, config: dict[str, Any], person: str, question: str = "",
+                      now: float | None = None) -> str:
+    """Answer "when will X be home / when does X usually leave?" from the presence statistics."""
+    now = time.time() if now is None else now
+    data = bt_presence.analyse(conn, config, now).get(person)
+    if data is None:
+        return f"No phone is tracked for {person.title()}, so I can't say."
+    lower = question.lower()
+    wants_leave = bool(re.search(r"\b(leave|go\s+out|head\s+out)\b", lower))
+    asks_usual = bool(re.search(r"\b(usually|typically|normally|does)\b", lower))
+    pred = bt_presence.eta_for_people(conn, config, now)[person]
+    name = data.display
+    if wants_leave:
+        typical = bt_presence.describe_typical(name, data.typical, "leave")
+        if data.state != "home":
+            live = f"{name} is out at the moment."
+        else:
+            live = bt_presence.describe_prediction(name, pred, data.typical, now, None)
+        parts = [typical, live] if asks_usual and typical else [live, typical]
+        return " ".join(p for p in parts if p)
+    typical = bt_presence.describe_typical(name, data.typical, "return")
+    if data.state == "home":
+        since = f" (arrived {_time_ago(data.sessions[-1].start)})" if data.sessions else ""
+        live = f"{name} is already home{since}."
+    else:
+        live = bt_presence.describe_prediction(name, pred, data.typical, now, None)
+    parts = [typical, live] if asks_usual and typical else [live, typical]
+    return " ".join(p for p in parts if p)
+
+
 async def answer_presence(
-    text: str, config: dict[str, Any], db_path: Path,
+    text: str, config: dict[str, Any], db_path: Path, now: float | None = None,
 ) -> str:
     """Answer a presence query with a factual response."""
     lower = text.lower()
@@ -310,6 +344,8 @@ async def answer_presence(
             entry = bt_people.person_entry(conn, config, person)
             if entry and entry["state"] == "no_phone":
                 return no_phone_message(entry)
+            if entry and re.search(r"\bwhen\s+(?:will|is|does|would|should)\b", lower):
+                return predictive_answer(conn, config, entry["person"], text, now)
             dev = _resolve_person(person, config, conn)
             if not dev:
                 return f"I don't know who \"{person}\" is. Add them to person_aliases in config."
@@ -712,6 +748,32 @@ def _markup_from_dict(kb: dict) -> "InlineKeyboardMarkup":
 
 def _pending_names(context) -> dict[str, dict[str, Any]]:
     return context.bot_data.setdefault("nd_pending", {})
+
+
+async def _cmd_eta(update, context) -> None:
+    """Handle /eta [name]: when people who are out are expected home (see bt_presence)."""
+    if not _is_authorized(update.effective_chat.id):
+        return
+    conn = bt_db.get_connection(_get_db_path())
+    try:
+        config = load_config()
+        if context.args:
+            entry = bt_people.person_entry(conn, config, " ".join(context.args))
+            if entry is None:
+                await update.message.reply_text(f"I don't know who \"{' '.join(context.args)}\" is.")
+            elif entry["state"] == "no_phone":
+                await update.message.reply_text(no_phone_message(entry))
+            else:
+                await update.message.reply_text(predictive_answer(conn, config, entry["person"], "when will they be home"))
+            return
+        away = [p for p in bt_people.people_status(conn, config) if p["state"] == "away"]
+        if not away:
+            await update.message.reply_text("Everyone with a tracked phone is home.")
+            return
+        lines = [predictive_answer(conn, config, p["person"], "when will they be home") for p in away]
+    finally:
+        conn.close()
+    await update.message.reply_text("\n\n".join(lines))
 
 
 async def _cmd_unnamed(update, context) -> None:
@@ -1354,6 +1416,7 @@ def main() -> None:
     app.add_handler(CommandHandler("readaloud", _cmd_readaloud))
     app.add_handler(CommandHandler("habits", _cmd_habits))
     app.add_handler(CommandHandler("unnamed", _cmd_unnamed))
+    app.add_handler(CommandHandler("eta", _cmd_eta))
     app.add_handler(CallbackQueryHandler(_on_habit_callback, pattern=r"^habit:"))
     app.add_handler(CallbackQueryHandler(_on_newdevice_callback, pattern=r"^nd:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, _handle_message))
@@ -1369,6 +1432,10 @@ def main() -> None:
         # ...and so does the nightly database backup to the external drive
         application.bot_data["backup_task"] = asyncio.create_task(
             bt_backup.run_loop(_get_db_path(), bt_backup.CONFIG_PATH, load_config),
+        )
+        # ...and the opt-in "later than usual" check (does nothing unless late_alerts_enabled)
+        application.bot_data["late_task"] = asyncio.create_task(
+            bt_presence.run_late_loop(_get_db_path(), load_config, send_message),
         )
 
         await application.bot.set_my_commands([
@@ -1387,6 +1454,7 @@ def main() -> None:
             BotCommand("readaloud", "Toggle Alexa read-aloud for chat"),
             BotCommand("habits", "List outstanding habits (tap to complete)"),
             BotCommand("unnamed", "Name connected devices that have no name"),
+            BotCommand("eta", "When people who are out will be home"),
         ])
 
     app.post_init = _post_init

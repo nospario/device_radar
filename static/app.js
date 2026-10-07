@@ -300,11 +300,21 @@ function initDashboard() {
 
 const PEOPLE_ICON = {home: '\u{1F7E2}', away: '\u{1F534}', no_phone: '\u26AA'};
 
+// "expected ~18:40" for someone who is away and has a usable prediction ('' otherwise)
+function etaText(p) {
+    const pr = p.prediction;
+    if (p.state !== 'away' || !pr || pr.kind !== 'return') return '';
+    if (pr.status === 'ready') {
+        return ' \u00b7 expected ~' + new Date(pr.median * 1000).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit', hourCycle: 'h23'});
+    }
+    return pr.status === 'overdue' ? ' \u00b7 later than usual' : '';
+}
+
 function peopleChipText(p) {
     if (p.state === 'home') return p.since ? `arrived ${timeAgo(p.since)}` : 'home';
     if (p.state === 'away') {
-        if (p.since) return `left ${timeAgo(p.since)}`;
-        return p.last_seen ? `last seen ${timeAgo(p.last_seen)}` : 'away';
+        const base = p.since ? `left ${timeAgo(p.since)}` : (p.last_seen ? `last seen ${timeAgo(p.last_seen)}` : 'away');
+        return base + etaText(p);
     }
     return 'no phone tracked';
 }
@@ -335,6 +345,166 @@ async function loadPeople() {
     } catch (e) {
         console.error('Failed to load people:', e);
     }
+}
+
+// -- Reports: trends and predictions from each person's phone --
+
+function fmtHours(h) {
+    const total = Math.round(h * 60) % 1440;
+    return String(Math.floor(total / 60)).padStart(2, '0') + ':' + String(total % 60).padStart(2, '0');
+}
+
+function timeSummaryHtml(s) {
+    if (!s || !s.enough) return `<span class="text-dim">not enough data yet (${s ? s.n : 0} so far)</span>`;
+    return `<strong>${fmtHours(s.median)}</strong> <span class="text-dim">middle half ${fmtHours(s.q1)}\u2013${fmtHours(s.q3)} \u00b7 ${s.n} outings</span>`;
+}
+
+function hoursOutHtml(s) {
+    if (!s || !s.enough) return '<span class="text-dim">\u2014</span>';
+    return `<strong>${s.median.toFixed(1)} h</strong> <span class="text-dim">typically</span>`;
+}
+
+// One row per day, 0-24h across: green = at home, hatched grey = scanner was off, dim = still to come
+function timelineSvg(rows) {
+    const left = 54, width = 720, rowH = 15, gap = 4, top = 16;
+    const height = top + rows.length * (rowH + gap) + 2;
+    const x = h => left + (Math.max(0, Math.min(24, h)) / 24) * width;
+    let svg = `<svg class="timeline-svg" viewBox="0 0 ${left + width + 8} ${height}" role="img" aria-label="Time at home, last ${rows.length} days">`;
+    [0, 6, 12, 18, 24].forEach(h => {
+        svg += `<text class="tick" x="${x(h)}" y="10" text-anchor="middle">${String(h).padStart(2, '0')}</text>` +
+               `<line class="gridline" x1="${x(h)}" x2="${x(h)}" y1="${top - 2}" y2="${height - 2}"/>`;
+    });
+    rows.forEach((r, i) => {
+        const y = top + i * (rowH + gap);
+        svg += `<text class="daylabel" x="${left - 6}" y="${y + rowH - 3}" text-anchor="end">${escapeHtml(r.weekday)} ${escapeHtml(String(r.date).slice(8))}</text>` +
+               `<rect class="track" x="${left}" y="${y}" width="${width}" height="${rowH}" rx="2"/>`;
+        (r.unknown || []).forEach(([a, b]) => { svg += `<rect class="unknown" x="${x(a)}" y="${y}" width="${Math.max(1, x(b) - x(a))}" height="${rowH}"/>`; });
+        (r.home || []).forEach(([a, b]) => { svg += `<rect class="home" x="${x(a)}" y="${y}" width="${Math.max(1, x(b) - x(a))}" height="${rowH}" rx="2"/>`; });
+        if (r.future_from !== null && r.future_from !== undefined) {
+            svg += `<rect class="future" x="${x(r.future_from)}" y="${y}" width="${Math.max(0, x(24) - x(r.future_from))}" height="${rowH}"/>`;
+        }
+    });
+    return svg + '</svg>';
+}
+
+// Hours at home per day; faded bars are days the scanner only watched part of
+function dailyBarsSvg(rows) {
+    const width = 720, height = 90, base = 72, barW = width / rows.length;
+    let svg = `<svg class="bars-svg" viewBox="0 0 ${width} ${height}" role="img" aria-label="Hours at home per day">`;
+    [0, 12, 24].forEach(h => {
+        const y = base - (h / 24) * (base - 6);
+        svg += `<line class="gridline" x1="0" x2="${width}" y1="${y}" y2="${y}"/><text class="tick" x="2" y="${y - 2}">${h}h</text>`;
+    });
+    rows.forEach((r, i) => {
+        const h = Math.max(0, Math.min(24, r.home_h));
+        const barH = (h / 24) * (base - 6);
+        const label = `${r.weekday} ${r.date}: ${r.home_h} h at home` + (r.partial ? ` (scanner watched ${r.observed_h} h)` : '');
+        svg += `<rect class="bar${r.partial ? ' partial' : ''}" x="${(i * barW + 1).toFixed(1)}" y="${(base - barH).toFixed(1)}" ` +
+               `width="${(barW - 2).toFixed(1)}" height="${barH.toFixed(1)}"><title>${escapeHtml(label)}</title></rect>`;
+        if (i % 7 === 0 || i === rows.length - 1) {
+            svg += `<text class="tick" x="${(i * barW + barW / 2).toFixed(1)}" y="${height - 4}" text-anchor="middle">${escapeHtml(String(r.date).slice(5))}</text>`;
+        }
+    });
+    return svg + '</svg>';
+}
+
+function trendHtml(t) {
+    if (!t || !t.enough) return `<span class="text-dim">Not enough recent data to say whether weekday return times are drifting (${t ? t.n_recent : 0} in the last 4 weeks, ${t ? t.n_before : 0} before that).</span>`;
+    const dir = t.shift_min > 0 ? 'later' : 'earlier';
+    if (!t.clear) return `Weekday return times are steady: about ${Math.abs(t.shift_min)} min ${dir} than the 4 weeks before, which is within normal week-to-week variation.`;
+    return `<strong>Weekday return times have moved ${Math.abs(t.shift_min)} min ${dir}</strong> compared with the 4 weeks before (likely range ${t.low_min} to ${t.high_min} min).`;
+}
+
+function accuracyHtml(p) {
+    const b = p.backtest || {};
+    if (!b.tests) return '<span class="text-dim">Not enough history to test how accurate predictions would have been.</span>';
+    const hit = Math.round(b.hit_rate * 100);
+    let text = `Checked against ${b.tests} past outings: the 80% window contained the real return time ${hit}% of the time, ` +
+               `and the middle guess was off by ${b.median_error_min} min typically`;
+    if (b.naive_error_min !== null && b.naive_error_min !== undefined) text += ` (guessing the usual time would be off by ${b.naive_error_min} min)`;
+    return text + '.';
+}
+
+function personReportHtml(p) {
+    const q = p.quality || {};
+    const reasons = (q.reasons || []).map(r => `<li>${escapeHtml(r)}</li>`).join('');
+    const typical = p.typical || {};
+    const row = (label, t) => `<tr><th>${label}</th><td>${timeSummaryHtml(t.leave)}</td><td>${timeSummaryHtml(t.return)}</td><td>${hoursOutHtml(t.hours_out)}</td></tr>`;
+    const stateIcon = p.state === 'home' ? '\u{1F7E2}' : '\u{1F534}';
+    const days = (p.daily || []).filter(d => !d.partial);
+    const avg = kind => {
+        const v = days.filter(d => (kind === 'weekend') === ['Sat', 'Sun'].includes(d.weekday)).map(d => d.home_h);
+        return v.length ? (v.reduce((a, b) => a + b, 0) / v.length).toFixed(1) + ' h' : '\u2014';
+    };
+    return `<article class="report-card">
+        <header class="report-head">
+            <h3>${stateIcon} ${escapeHtml(p.display)}</h3>
+            <span class="q-badge q-${escapeAttr(q.verdict || 'insufficient')}" title="How trustworthy this person's data is">${escapeHtml(q.verdict || 'insufficient')}</span>
+        </header>
+        <p class="report-line">${escapeHtml(p.prediction_text || '')}</p>
+        ${p.typical_text ? `<p class="report-line text-dim">${escapeHtml(p.typical_text)}</p>` : ''}
+        <h4>Typical times</h4>
+        <div class="table-wrap"><table class="report-table"><thead><tr><th></th><th>Leaves</th><th>Gets home</th><th>Time out</th></tr></thead>
+        <tbody>${row('Weekdays', typical.weekday || {})}${row('Weekends', typical.weekend || {})}</tbody></table></div>
+        <h4>Last 14 days at home</h4>
+        ${timelineSvg(p.timeline || [])}
+        <p class="text-dim chart-note"><span class="swatch swatch-home"></span> at home <span class="swatch swatch-unknown"></span> scanner was off (unknown)</p>
+        <h4>Hours at home per day (last 28 days)</h4>
+        ${dailyBarsSvg(p.daily || [])}
+        <p class="text-dim chart-note">Average on fully-watched days: weekdays ${avg('weekday')}, weekends ${avg('weekend')}. Faded bars are days the scanner was only on for part of the day.</p>
+        <h4>Trend</h4>
+        <p class="report-line">${trendHtml(p.trend)}</p>
+        <h4>How reliable are the predictions?</h4>
+        <p class="report-line">${accuracyHtml(p)}</p>
+        <details class="quality-details"><summary>Data quality: ${escapeHtml(q.verdict || 'insufficient')}</summary>
+            <p class="text-dim">${escapeHtml(q.signal || '')} signal \u00b7 ${q.observed_days || 0} fully-watched days \u00b7 ${q.outings || 0} usable outings \u00b7 ${q.home_periods || 0} home periods${q.home_periods_per_day ? ` (${q.home_periods_per_day} a day)` : ''}</p>
+            ${reasons ? `<ul class="quality-reasons">${reasons}</ul>` : '<p class="text-dim">Nothing to flag.</p>'}
+        </details>
+    </article>`;
+}
+
+function householdHtml(h, untracked) {
+    if (!h || !h.people || !h.people.length) return '';
+    const names = h.people.map(n => escapeHtml(n.charAt(0).toUpperCase() + n.slice(1))).join(', ');
+    const line = (label, w) => {
+        const f = w && w.empty_from, u = w && w.empty_until;
+        if (!f || !f.enough || !u || !u.enough) return `<li>${label}: <span class="text-dim">not enough data yet</span></li>`;
+        return `<li>${label}: usually empty from <strong>${fmtHours(f.median)}</strong> until <strong>${fmtHours(u.median)}</strong> <span class="text-dim">(${f.n} empty periods)</span></li>`;
+    };
+    const hours = h.empty_h_per_day === null || h.empty_h_per_day === undefined ? '' :
+        `<p class="report-line">Nobody home for about <strong>${h.empty_h_per_day} h a day</strong> on average (${h.observed_days} days watched).</p>`;
+    const note = untracked && untracked.length
+        ? `<p class="text-dim">Counts only tracked phones (${names}). ${escapeHtml(untracked.join(', '))} ${untracked.length === 1 ? 'has' : 'have'} no phone tracked, so ${untracked.length === 1 ? 'that person' : 'those people'} may be home when the house looks empty.</p>` : '';
+    return `<article class="report-card"><header class="report-head"><h3>\u{1F3E0} The house</h3></header>${hours}
+        <ul class="household-list">${line('Weekdays', h.weekday)}${line('Weekends', h.weekend)}</ul>${note}</article>`;
+}
+
+function renderReports(report) {
+    const root = document.getElementById('reports-root');
+    const meta = document.getElementById('reports-meta');
+    if (!root) return;
+    if (meta && report.generated_at) meta.textContent = 'Updated ' + new Date(report.generated_at * 1000).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit', hourCycle: 'h23'});
+    if (!report.persons || !report.persons.length) {
+        root.innerHTML = '<p class="text-dim">No phones are being tracked yet. Name a phone like "Sam\'s iPhone" (or set its Role to Phone) and reports will build up as it comes and goes.</p>' +
+            ((report.untracked || []).length ? `<p class="text-dim">Known people without a phone: ${escapeHtml(report.untracked.join(', '))}.</p>` : '');
+        return;
+    }
+    root.innerHTML = report.persons.map(personReportHtml).join('') + householdHtml(report.household, report.untracked);
+}
+
+async function loadReports() {
+    const root = document.getElementById('reports-root');
+    try {
+        renderReports(await api('/api/reports'));
+    } catch (e) {
+        console.error('Failed to load reports:', e);
+        if (root) root.innerHTML = '<p class="text-dim">Could not load the reports.</p>';
+    }
+}
+
+function initReports() {
+    loadReports();
+    setInterval(loadReports, 5 * 60 * 1000);
 }
 
 // -- System health (watchdog results) --
