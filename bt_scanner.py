@@ -24,6 +24,7 @@ import bt_alexa
 import bt_classify
 import bt_cleanup
 import bt_db
+import bt_health
 import bt_newdevice
 import bt_pair
 import bt_people
@@ -117,6 +118,8 @@ class BluetoothRadarScanner:
         self.rssi_threshold: int = config["rssi_threshold"]
         self.cleanup_settings = bt_cleanup.load_settings(config)
         self.new_device_settings = bt_newdevice.load_settings(config)
+        # (start, end) of the downtime before this start-up, set by main(); announced once from run()
+        self.startup_gap: tuple[float, float] | None = None
 
         self.db_path = Path(__file__).resolve().parent / config["db_path"]
         self.scan_cycle: int = 0
@@ -676,6 +679,12 @@ class BluetoothRadarScanner:
                 self.wifi_departure_threshold,
             )
 
+        # If the Pi was off for a while, say so once (retries while the network comes up)
+        if self.startup_gap:
+            asyncio.create_task(bt_health.announce_restart(
+                self.startup_gap, bt_health.load_settings(self.config), bt_telegram.send_message,
+            ))
+
         # Sync paired status on startup
         try:
             conn = bt_db.get_connection(self.db_path)
@@ -766,12 +775,14 @@ def main() -> None:
     migrate_config_devices(config, db_path)
 
     # Record any time the Pi was off since the last run (used by the cleanup)
+    startup_gap = None
     try:
         conn = bt_db.get_connection(db_path)
         try:
             gap = bt_cleanup.note_scanner_start(conn)
         finally:
             conn.close()
+        startup_gap = gap
         if gap:
             logger.info(
                 "Scanner was not running for %.1f hours (until now); cleanup will not count it",
@@ -781,6 +792,7 @@ def main() -> None:
         logger.warning("Failed to record scanner start", exc_info=True)
 
     scanner = BluetoothRadarScanner(config)
+    scanner.startup_gap = startup_gap
     asyncio.run(scanner.run())
 
 

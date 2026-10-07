@@ -188,6 +188,9 @@ Edit `config.json` in the same directory as the scripts:
 | `rssi_threshold` | `-85` | Minimum signal strength (dBm); weaker signals are ignored |
 | `db_path` | `bt_radar.db` | Path to the SQLite database file |
 | `web_port` | `8080` | Port for the web dashboard |
+| `health_alerts_enabled` | `true` | Health watchdog: Telegram alerts for scanner/service/calendar/disk/temperature problems and offline always-on devices (see CLAUDE.md, *Health Watchdog*) |
+| `health_alerts_dry_run` | `false` | Log health alerts without sending them |
+| `health_offline_minutes` | `20` | Minutes of scanner running time before an always-on device is reported offline |
 | `notify_phones_only` | `true` | Only phones send arrival/departure Telegram alerts (laptops and smart-home devices stay silent even with notify on) |
 | `cleanup_enabled` | `true` | Automatically hide/delete stale, unnamed device records (see CLAUDE.md, *Device Cleanup*) |
 | `cleanup_dry_run` | `false` | Log what cleanup would do without changing anything |

@@ -58,6 +58,29 @@ class AlertCase(unittest.TestCase):
         return [c.args for c in self.send.await_args_list]
 
 
+class StartupTests(AlertCase):
+    def test_scanner_starts_with_no_startup_gap(self) -> None:
+        self.assertIsNone(self.scanner().startup_gap)
+
+    def test_run_announces_a_recorded_gap_once(self) -> None:
+        scanner = self.scanner()
+        scanner.startup_gap = (time.time() - 86400, time.time())
+        announce = mock.AsyncMock(return_value=True)
+
+        async def go():
+            with mock.patch.object(bt_scanner.bt_health, "announce_restart", announce), \
+                 mock.patch.object(scanner, "process_scan", side_effect=asyncio.CancelledError):
+                try:
+                    await scanner.run()
+                except asyncio.CancelledError:
+                    pass
+                await asyncio.sleep(0)
+
+        asyncio.run(go())
+        announce.assert_awaited_once()
+        self.assertEqual(announce.await_args.args[0], scanner.startup_gap)
+
+
 class ArrivalTests(AlertCase):
     def test_phone_arrival_alerts(self) -> None:
         mac = self.add("AA:00:00:00:00:01", "Lilou's iPhone", "Phone")

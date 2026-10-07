@@ -15,6 +15,7 @@ from flask import Flask, jsonify, render_template, request
 import bt_calendar
 import bt_cleanup
 import bt_db
+import bt_health
 import bt_news
 import bt_pair
 import bt_people
@@ -223,6 +224,8 @@ def api_update_device(mac: str):
         kwargs["news_feeds"] = data["news_feeds"]
     if "alexa_voice" in data:
         kwargs["alexa_voice"] = data["alexa_voice"]
+    if "always_on" in data:
+        kwargs["always_on"] = bool(data["always_on"])
     if "role" in data:
         role = (data["role"] or "").strip().lower()
         if role and role not in bt_people.ROLES:
@@ -280,6 +283,16 @@ def api_events():
     total = bt_db.count_events(conn, mac=mac or None, event_type=event_type or None)
     conn.close()
     return jsonify({"events": events, "total": total})
+
+
+@app.route("/api/health")
+def api_health():
+    """Latest results of the health watchdog (see bt_health)."""
+    conn = get_conn()
+    try:
+        return jsonify(bt_health.load_results(conn))
+    finally:
+        conn.close()
 
 
 @app.route("/api/people")

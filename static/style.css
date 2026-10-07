@@ -589,3 +589,18 @@ tbody tr:hover { background: var(--bg-hover); }
 .person-no_phone { border-style: dashed; color: var(--text-dim); }
 .person-detail { color: var(--text-dim); font-size: 0.8rem; }
 
+/* System health */
+.health-strip {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 0.5rem 0.9rem;
+    margin-bottom: 1rem;
+    font-size: 0.9rem;
+}
+.health-strip-ok { border-color: var(--green); }
+.health-strip-warn { border-color: var(--yellow); }
+.health-strip-fail { border-color: var(--red); }
+.health-strip summary { cursor: pointer; }
+.health-list { list-style: none; margin: 0.6rem 0 0.2rem; display: grid; gap: 0.25rem; }
+

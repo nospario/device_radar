@@ -4,6 +4,7 @@ and proactive arrival/departure notifications."""
 
 from __future__ import annotations
 
+import asyncio
 import html
 import json
 import logging
@@ -16,6 +17,7 @@ from typing import Any
 import httpx
 
 import bt_db
+import bt_health
 import bt_newdevice
 import bt_people
 import bt_search
@@ -517,6 +519,21 @@ async def _cmd_lastseen(update, context) -> None:
     )
 
 
+def _health_lines(db_path: Path) -> list[str]:
+    """Health summary for /status: the headline, then any problems (see bt_health)."""
+    conn = bt_db.get_connection(db_path)
+    try:
+        health = bt_health.load_results(conn)
+    finally:
+        conn.close()
+    icon = {0: "\U0001f7e2", 1: "\U0001f7e1", 2: "\U0001f534"}
+    head = "\u26a0\ufe0f" if health["stale"] and health["checked_at"] else icon.get(health["worst"], "\U0001f7e2")
+    lines = ["", f"{head} Health: {health['summary']}"]
+    for chk in [c for c in health["checks"] if c["status"] != "ok"][:8]:
+        lines.append(f"  {icon[1 if chk['status'] == 'warn' else 2]} {chk['label']}: {chk['message']}")
+    return lines
+
+
 async def _cmd_status(update, context) -> None:
     """Handle /status — system health overview."""
     if not _is_authorized(update.effective_chat.id):
@@ -557,6 +574,7 @@ async def _cmd_status(update, context) -> None:
         f"{w_icon} Web: {web}",
         f"{b_icon} Bot: {bot}",
     ]
+    lines += _health_lines(_get_db_path())
     await update.message.reply_text("\n".join(lines))
 
 
@@ -1342,6 +1360,11 @@ def main() -> None:
     # Register bot commands with Telegram so they appear in the / menu
     async def _post_init(application) -> None:
         from telegram import BotCommand
+
+        # The health watchdog lives in this process so it can still report if the scanner dies
+        application.bot_data["health_task"] = asyncio.create_task(
+            bt_health.run_loop(_get_db_path(), load_config, send_message),
+        )
 
         await application.bot.set_my_commands([
             BotCommand("home", "Who is home right now"),

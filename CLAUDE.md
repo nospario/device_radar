@@ -41,11 +41,12 @@ Supporting modules:
 
 SQLite with WAL mode (`bt_radar.db`). Core tables:
 
-- **devices** — all known devices with state (`DETECTED`/`LOST`), scan info, flags (`is_watchlisted`, `is_notify`, `is_hidden`, `is_paired`), device linking (`linked_to`), `role` (`phone`/`laptop`/`smart_home`/`other`, optional; otherwise implied by the device type) and `person` (optional; otherwise taken from the name), see *People and Roles*, proximity alert settings (`proximity_enabled`, `proximity_rssi_threshold`, `proximity_interval`, `proximity_alexa_device`, `proximity_prompt`, `last_proximity_message`), calendar integration (`calendar_calendars` — JSON array of calendar names), news feed selection (`news_feeds` — JSON array of feed keys), and Alexa voice selection (`alexa_voice` — Amazon Polly voice name for SSML)
+- **devices** — all known devices with state (`DETECTED`/`LOST`), scan info, flags (`is_watchlisted`, `is_notify`, `is_hidden`, `is_paired`), device linking (`linked_to`), `role` (`phone`/`laptop`/`smart_home`/`other`, optional; otherwise implied by the device type) and `person` (optional; otherwise taken from the name), see *People and Roles*, `always_on` (alert if offline, see *Health Watchdog*), proximity alert settings (`proximity_enabled`, `proximity_rssi_threshold`, `proximity_interval`, `proximity_alexa_device`, `proximity_prompt`, `last_proximity_message`), calendar integration (`calendar_calendars` — JSON array of calendar names), news feed selection (`news_feeds` — JSON array of feed keys), and Alexa voice selection (`alexa_voice` — Amazon Polly voice name for SSML)
 - **events** — arrival/departure event log with timestamps
 - **news_headlines** — fetched BBC RSS headlines with guid deduplication, feed_key, title, published timestamp
 - **news_read** — per-device read tracking (mac_address + headline_id), ensures headlines aren't repeated
 - **chat_history** — conversation history for Ollama context (Telegram bot, keyed by numeric chat_id; entries older than 7 days are cleaned up on bot start)
+- **health_results** / **health_state** — latest result of each health check, and what has already been alerted (see *Health Watchdog*)
 - **device_alerts** — which MACs have been announced as new (`kind` 'new') or deleted by the cleanup (`kind` 'forgotten'), see *New Device Alerts*
 - **scanner_state** / **scanner_gaps** — scanner heartbeat and recorded downtime periods (used by the cleanup, see *Device Cleanup*)
 - **migrations** — tracks one-time data migrations
@@ -188,7 +189,7 @@ On first run, if `config.json` doesn't exist, a default is created and the scrip
 Flask app on port 8080 with dark theme.
 
 ### Pages
-- **Dashboard** (`/`) — "who's home" strip (one chip per person, decided by phones), live device list with stats, per-column filters (the Name filter also matches IP address and manufacturer), watchlist/notify toggles, and a Housekeeping panel (stale-record counts and a "Clean up now" button)
+- **Dashboard** (`/`) — "who's home" strip (one chip per person, decided by phones), health panel, live device list with stats, per-column filters (the Name filter also matches IP address and manufacturer), watchlist/notify toggles, and a Housekeeping panel (stale-record counts and a "Clean up now" button)
 - **Device Detail** (`/device/<mac>`) — info, settings (including Alexa voice selection), linking, event history, proximity Alexa config (BLE devices only), calendar selection, BBC News feed selection (all devices)
 - **History** (`/history`) — filterable paginated event log
 - **Pairing** (`/pairing`) — pair/unpair via web UI
@@ -200,6 +201,7 @@ Flask app on port 8080 with dark theme.
 - `GET /api/events` — paginated events (filters: mac, event_type)
 - `GET /api/stats` — dashboard counters
 - `GET /api/people` — home/away per person, decided by phones (see *People and Roles*)
+- `GET /api/health` — latest health watchdog results (see *Health Watchdog*)
 - `GET /api/cleanup/preview` — what a cleanup would do (total, protected, to_delete, to_hide, DB size, settings); changes nothing
 - `POST /api/cleanup/run` — hide + delete stale devices now (body `{"dry_run": bool}`; real run backs up first, ignores the per-run cap, compacts the DB)
 - `POST /api/devices/<mac>/link` — link devices
@@ -327,6 +329,22 @@ Module: `bt_newdevice.py`. When the WiFi scan finds a MAC that was never stored,
 
 `bt_wifi.lookup_oui_vendor()` reads the full IEEE registry (`/usr/share/ieee-data/oui.txt`, apt package **`ieee-data`**, ~35,800 vendors, loaded once on first use) and falls back to the short built-in `OUI_VENDORS` table if the file is missing. A **locally administered** address (bit 0x02 of the first octet, `bt_wifi.is_private_mac`) is a private/randomised WiFi address and has no vendor; the dashboard shows "Private address" in the Manufacturer column for WiFi-only devices (`manufacturerLabel` in `static/app.js`, searchable). The locally administered test is meaningful for WiFi/Ethernet MACs only, not for Bluetooth LE random addresses. Vendor names are filled in on the next WiFi scan.
 
+## Health Watchdog
+
+Module: `bt_health.py`. A loop in the **Telegram bot process** (`bt-telegram`, started in `_post_init`, first pass 45 s after start) runs the checks every `health_interval_seconds` (300) and stores the latest result of each in `health_results`; alert bookkeeping is in `health_state`. It lives in the bot process, not the scanner, so it still reports if the scanner dies.
+
+**Checks:** scanner heartbeat (`scanner_state`; warn after 3 min, fail after 10), systemd services (`health_services`; default bt-scanner, bt-web, bt-telegram, pihole-FTL, ollama, obsidian-sync, nftables, ssh), Ollama API, **calendar login** (`bt_calendar.check_login`, every 6 h; a rejected login fails immediately, being unreachable only warns), disk space of `/` and the external drive (warn 85%, fail 95%), external drive mounted, CPU temperature (warn 80 °C, fail 85) and throttling/under-voltage *right now*, clock sync, reboot required, pending updates (`apt-get -s upgrade`, daily, warn at 50), database `PRAGMA quick_check` (daily), and **always-on devices**.
+
+**Always-on devices** (`devices.always_on`, "Always on" checkbox on the device page): a device is reported offline when it is not `DETECTED` and has not been seen for `health_offline_minutes` (20) of **scanner running time** (`bt_cleanup.running_cutoff`, same rule as the cleanup), so a scanner restart or a powered-off Pi never makes everything look offline.
+
+**Quiet by design** (`process_results`): a problem must be seen on `confirm` consecutive passes (2; 1 for a revoked calendar login, a reboot request, a failed database check and offline devices); one Telegram message covers everything that changed in a pass; a "back to normal after N" message follows; a failure that persists is repeated at most every `health_reminder_hours` (24); a drop from fail to warn is not re-announced. Slow checks (calendar, updates, database) are reused between their runs.
+
+**"Back online" message**: when the scanner starts after 30+ minutes of downtime (the gap recorded by `bt_cleanup.note_scanner_start`) it sends "Device Radar is back online after N offline", retrying while the network comes up (`announce_restart`).
+
+**Where it shows**: dashboard health panel (`GET /api/health`, `renderHealth`; opens itself when something is wrong and remembers if you open/close it; turns amber if the watchdog stops reporting), and the `/status` Telegram command.
+
+**Config keys** (all optional): `health_alerts_enabled` (true), `health_alerts_dry_run` (false: log only), `health_interval_seconds`, `health_reminder_hours`, `health_services`, `health_disk_warn_percent` / `health_disk_fail_percent`, `health_temp_warn_c` / `health_temp_fail_c`, `health_updates_warn`, `health_offline_minutes`, `health_external_path` (`/mnt/external`). Changes are picked up on the next pass without a restart.
+
 ## Discovery Mode
 
 ```bash
@@ -397,6 +415,7 @@ bt-monitor/
 ├── bt_cleanup.py          # Stale device cleanup (hide/delete, protection rules, backup, CLI)
 ├── bt_newdevice.py        # New WiFi device alerts + tap-to-name from Telegram
 ├── bt_people.py           # People, device roles, phone-only alerts, who's home
+├── bt_health.py           # Health watchdog: checks, quiet alerting, always-on devices, restart message
 ├── bt_alexa.py            # Alexa TTS, welcome greetings, encouragement, proximity alerts
 ├── bt_classify.py         # Device classification logic
 ├── bt_pair.py             # Bluetooth pairing helper

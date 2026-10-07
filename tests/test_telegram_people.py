@@ -13,6 +13,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import bt_db  # noqa: E402
+import bt_health  # noqa: E402
 import bt_newdevice as nd  # noqa: E402
 import bt_telegram as tg  # noqa: E402
 
@@ -133,6 +134,27 @@ class PersonQuestionTests(Case):
         bt_db.upsert_device(self.conn, "AA:00:00:00:00:08", advertised_name="x", scan_type="WiFi", state="DETECTED")
         nd.apply_role(self.conn, "AA:00:00:00:00:08", "home", "Garden Camera")
         self.assertIsNone(bt_db.get_device(self.conn, "AA:00:00:00:00:08")["person"])
+
+
+class StatusHealthTests(Case):
+    def test_status_says_nothing_has_run_yet(self) -> None:
+        lines = tg._health_lines(self.db)
+        self.assertIn("Health: no health checks have run yet", " ".join(lines))
+
+    def test_status_lists_problems_worst_first_and_not_the_ok_ones(self) -> None:
+        bt_health.process_results(self.conn, [
+            bt_health.Check("a", "Alpha", "ok", "fine"),
+            bt_health.Check("b", "Calendar login", "fail", "iCloud rejected the login", confirm=1),
+            bt_health.Check("c", "Updates", "warn", "60 pending", confirm=1)], bt_health.Settings(), time.time())
+        text = "\n".join(tg._health_lines(self.db))
+        self.assertIn("Health: 2 problems", text)
+        self.assertLess(text.index("Calendar login"), text.index("Updates"))
+        self.assertNotIn("Alpha", text)
+        self.assertIn("\U0001f534 Calendar login: iCloud rejected the login", text)
+
+    def test_status_all_ok(self) -> None:
+        bt_health.process_results(self.conn, [bt_health.Check("a", "Alpha", "ok", "fine")], bt_health.Settings(), time.time())
+        self.assertIn("all 1 checks OK", "\n".join(tg._health_lines(self.db)))
 
 
 class FormatTests(unittest.TestCase):

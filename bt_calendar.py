@@ -80,6 +80,35 @@ _calendar_names_fetched_at: float = 0
 # Calendar discovery
 # ---------------------------------------------------------------------------
 
+def check_login(config: dict[str, Any]) -> tuple[str, str]:
+    """Try the iCloud CalDAV login without fetching events.
+
+    Returns ``(state, message)`` where state is ``ok``, ``disabled``, ``no_credentials``,
+    ``auth`` (login rejected, e.g. the app password was revoked) or ``unreachable``.
+    Synchronous and blocking (a few seconds); call it from an executor.
+    """
+    if not config.get("calendar_enabled", False):
+        return "disabled", "calendar is switched off"
+    url = config.get("calendar_url", "https://caldav.icloud.com")
+    username = os.environ.get(config.get("calendar_username_env", "APPLE_ID_EMAIL"), "")
+    password = os.environ.get(config.get("calendar_password_env", "APPLE_ID_APP_PASSWORD"), "")
+    if not username or not password:
+        return "no_credentials", "calendar login details are not set"
+    try:
+        import caldav
+        client = caldav.DAVClient(url=url, username=username, password=password, timeout=20)
+        client.principal()
+        return "ok", "login works"
+    except Exception as exc:  # noqa: BLE001
+        try:
+            from caldav.lib import error as caldav_error
+            if isinstance(exc, caldav_error.AuthorizationError):
+                return "auth", "iCloud rejected the login (the app password may have been revoked)"
+        except Exception:  # noqa: BLE001
+            pass
+        return "unreachable", f"could not reach iCloud ({type(exc).__name__})"
+
+
 def get_available_calendars(config: dict[str, Any]) -> list[str]:
     """Return list of calendar names from the CalDAV account (cached).
 

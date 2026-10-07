@@ -60,6 +60,25 @@ def ensure_alert_tables(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def ensure_health_tables(conn: sqlite3.Connection) -> None:
+    """Tables used by the health watchdog (see bt_health).
+
+    ``health_results`` is the latest result of each check (what the dashboard and
+    /status show); ``health_state`` tracks alerting so a problem is reported once.
+    """
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS health_results ("
+        "key TEXT PRIMARY KEY, label TEXT NOT NULL, status TEXT NOT NULL, "
+        "message TEXT NOT NULL, checked_at REAL NOT NULL)"
+    )
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS health_state ("
+        "key TEXT PRIMARY KEY, status TEXT NOT NULL, since REAL NOT NULL, "
+        "bad_count INTEGER NOT NULL DEFAULT 0, alerted_status TEXT, last_alert REAL)"
+    )
+    conn.commit()
+
+
 def _run_migration(conn: sqlite3.Connection, name: str, sql: str) -> None:
     """Run a SQL statement once, tracked by name in the migrations table."""
     if conn.execute("SELECT 1 FROM migrations WHERE name = ?", (name,)).fetchone():
@@ -189,6 +208,8 @@ def init_db(db_path: str | Path = DEFAULT_DB_PATH) -> None:
 
     ensure_scanner_tables(conn)
     ensure_alert_tables(conn)
+    ensure_health_tables(conn)
+    _add_column(conn, "devices", "always_on", "INTEGER DEFAULT 0")
     _add_column(conn, "devices", "role", "TEXT")
     _add_column(conn, "devices", "person", "TEXT")
 
@@ -321,6 +342,7 @@ def update_device(
     alexa_voice: str | None = None,
     role: str | None = None,
     person: str | None = None,
+    always_on: bool | None = None,
 ) -> bool:
     """Update specific fields on a device. Returns True if a row was updated."""
     sets: list[str] = []
@@ -386,6 +408,9 @@ def update_device(
     if person is not None:
         sets.append("person = ?")
         params.append(person or None)
+    if always_on is not None:
+        sets.append("always_on = ?")
+        params.append(int(always_on))
 
     if not sets:
         return False

@@ -268,6 +268,7 @@ function initDashboard() {
     restoreFilters();
     loadStats();
     loadPeople();
+    loadHealth();
     loadDevices();
     loadCleanup();
 
@@ -284,6 +285,7 @@ function initDashboard() {
     dashboardTimer = setInterval(() => {
         loadStats();
         loadPeople();
+        loadHealth();
         loadDevices();
     }, REFRESH_INTERVAL);
     cleanupTimer = setInterval(loadCleanup, CLEANUP_REFRESH_INTERVAL);
@@ -327,6 +329,34 @@ async function loadPeople() {
         renderPeople(await api('/api/people'));
     } catch (e) {
         console.error('Failed to load people:', e);
+    }
+}
+
+// -- System health (watchdog results) --
+
+const HEALTH_ICON = {ok: '\u{1F7E2}', warn: '\u{1F7E1}', fail: '\u{1F534}'};
+
+function renderHealth(h) {
+    const el = document.getElementById('health-strip');
+    if (!el) return;
+    const level = h.stale ? 'warn' : (h.worst >= 2 ? 'fail' : (h.worst === 1 ? 'warn' : 'ok'));
+    const existing = el.querySelector('details');
+    const open = existing ? existing.open : h.problems > 0;   // keep the user's choice across refreshes
+    const rows = (h.checks || []).map(c =>
+        `<li class="health-${escapeAttr(c.status)}">${HEALTH_ICON[c.status] || ''} ` +
+        `<strong>${escapeHtml(c.label)}</strong> <span class="text-dim">${escapeHtml(c.message)}</span></li>`
+    ).join('');
+    el.hidden = false;
+    el.className = 'health-strip health-strip-' + level;
+    el.innerHTML = `<details${open ? ' open' : ''}><summary>${HEALTH_ICON[level]} Health: ` +
+                   `${escapeHtml(h.summary)}</summary><ul class="health-list">${rows}</ul></details>`;
+}
+
+async function loadHealth() {
+    try {
+        renderHealth(await api('/api/health'));
+    } catch (e) {
+        console.error('Failed to load health:', e);
     }
 }
 
@@ -561,6 +591,7 @@ function initDevicePage(mac) {
                 body: JSON.stringify({
                     friendly_name: document.getElementById('friendly-name').value,
                     device_type: deviceType,
+                    always_on: document.getElementById('always-on').checked,
                     role: document.getElementById('device-role').value,
                     person: document.getElementById('device-person').value,
                     is_watchlisted: document.getElementById('is-watchlisted').checked,

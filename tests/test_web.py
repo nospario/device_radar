@@ -14,6 +14,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import bt_db  # noqa: E402
+import bt_health  # noqa: E402
 import bt_web  # noqa: E402
 
 
@@ -119,6 +120,31 @@ class WebSmokeTests(unittest.TestCase):
         html = self.client.get("/device/AA:BB:CC:00:00:01").get_data(as_text=True)
         self.assertIn('id="device-role"', html)
         self.assertIn('id="device-person"', html)
+
+    def test_health_endpoint_reports_the_latest_results(self) -> None:
+        empty = self.client.get("/api/health").get_json()
+        self.assertEqual((empty["checks"], empty["stale"]), ([], True))
+        conn = bt_db.get_connection(bt_web.get_db_path())
+        bt_health.process_results(conn, [bt_health.Check("a", "Alpha", "ok", "fine"),
+                                         bt_health.Check("b", "Beta", "fail", "broken")],
+                                  bt_health.Settings(), time.time())
+        conn.close()
+        health = self.client.get("/api/health").get_json()
+        self.assertEqual((health["stale"], health["problems"], health["worst"]), (False, 1, 2))
+        self.assertEqual([c["label"] for c in health["checks"]], ["Beta", "Alpha"])
+
+    def test_always_on_can_be_set_and_cleared_and_appears_in_the_device_list(self) -> None:
+        mac = "AA:BB:CC:00:00:01"
+        self.assertEqual(self.patch(mac, {"always_on": True}).status_code, 200)
+        self.assertEqual(self.device(mac)["always_on"], 1)
+        dev = next(d for d in self.client.get("/api/devices").get_json() if d["mac_address"] == mac)
+        self.assertEqual(dev["always_on"], 1)
+        self.patch(mac, {"always_on": False})
+        self.assertEqual(self.device(mac)["always_on"], 0)
+
+    def test_device_page_has_the_always_on_checkbox_and_dashboard_the_health_strip(self) -> None:
+        self.assertIn('id="always-on"', self.client.get("/device/AA:BB:CC:00:00:01").get_data(as_text=True))
+        self.assertIn('id="health-strip"', self.client.get("/").get_data(as_text=True))
 
     def test_dashboard_has_the_people_strip(self) -> None:
         self.assertIn('id="people-strip"', self.client.get("/").get_data(as_text=True))
