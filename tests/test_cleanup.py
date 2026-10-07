@@ -122,13 +122,19 @@ class ProtectionTests(CleanupTestCase):
         self.assertTrue(self.exists(primary))
         self.assertTrue(self.exists(secondary))
 
-    def test_event_history_protects(self) -> None:
-        mac = self.add("BB:00:00:00:03:01", age=self.OLD)
-        self.conn.execute(
-            "INSERT INTO events (mac_address, event_type, timestamp) VALUES (?, 'arrived', ?)",
-            (mac, NOW - self.OLD))
+    def test_event_history_alone_does_not_protect_and_is_deleted_with_device(self) -> None:
+        stale = self.add("BB:00:00:00:03:01", age=self.OLD)
+        kept = self.add("BB:00:00:00:03:02", age=self.OLD, is_watchlisted=1)
+        for mac in (stale, kept):
+            self.conn.execute(
+                "INSERT INTO events (mac_address, event_type, timestamp) VALUES (?, 'arrived', ?)",
+                (mac, NOW - self.OLD))
         self.conn.commit()
-        self.assert_survives(mac)
+        self.run_cleanup()
+        self.assertFalse(self.exists(stale))
+        self.assertTrue(self.exists(kept))
+        remaining = [r[0] for r in self.conn.execute("SELECT mac_address FROM events")]
+        self.assertEqual(remaining, [kept])
 
     def test_calendar_news_voice_settings_protect(self) -> None:
         self.assert_survives(self.add("BB:00:00:00:04:01", age=self.OLD, calendar_calendars='["Work"]'))
@@ -179,6 +185,14 @@ class ModeTests(CleanupTestCase):
         self.assertEqual(self.run_cleanup()["deleted"], 3)
         self.assertEqual(self.run_cleanup(unlimited=True)["deleted"], 2)
         self.assertEqual(preview_total(self.conn), 0)
+
+    def test_works_when_caller_has_an_open_transaction(self) -> None:
+        # The scanner calls cleanup on a connection that may have uncommitted writes.
+        mac = self.add("CC:00:00:00:05:01", age=10 * DAY)
+        self.conn.execute("UPDATE devices SET last_rssi = -50 WHERE mac_address = 'nonexistent'")
+        self.assertTrue(self.conn.in_transaction)
+        self.assertEqual(self.run_cleanup()["deleted"], 1)
+        self.assertFalse(self.exists(mac))
 
     def test_news_read_rows_removed_with_device(self) -> None:
         mac = self.add("CC:00:00:00:03:01", age=10 * DAY)

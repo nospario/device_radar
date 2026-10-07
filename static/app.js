@@ -289,7 +289,7 @@ async function loadCleanup() {
         settingsEl.textContent =
             `Automatic cleanup is ${mode}: unnamed devices are hidden after ${s.hide_after_hours}h unseen, ` +
             `deleted after ${s.delete_short_lived_after_days}d (short-lived) or ${s.delete_other_after_days}d (others). ` +
-            `Named, watchlisted, paired, linked and devices with history are never removed.`;
+            `Named, watchlisted, notify, paired and linked devices are never removed.`;
         btn.disabled = (p.to_delete + p.to_hide) === 0;
     } catch (e) {
         console.error('Failed to load cleanup status:', e);
@@ -301,7 +301,7 @@ async function runCleanup() {
     const btn = document.getElementById('btn-cleanup');
     const result = document.getElementById('cleanup-result');
     if (!confirm('Permanently delete stale, unnamed device records now?\n\n' +
-                 'Devices you have named, watchlisted, paired or linked, and any with event history, are never touched. ' +
+                 'Devices you have named, watchlisted, paired or linked are never touched. ' +
                  'A database backup is taken before the first cleanup.')) return;
     btn.disabled = true;
     result.textContent = 'Cleaning up...';

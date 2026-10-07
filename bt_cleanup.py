@@ -15,11 +15,13 @@ interest in:
    period: short-lived records (seen for under an hour in total, i.e. a
    rotated address) after a few days, anything else after a month.
 
-A device is *protected* (never hidden or deleted) if it has a friendly name,
-is watchlisted / notify / paired / welcome / proximity / DNS-tracked, has an
-IP address, is linked to (or from) another device, has calendar / news /
-Alexa settings, or has any event history. Devices currently ``DETECTED`` are
-never touched either.
+A device is *protected* (never hidden or deleted) if a person has shown
+interest in it: it has a friendly name, is watchlisted / notify / paired /
+welcome / proximity / DNS-tracked, has an IP address, is linked to (or from)
+another device, or has calendar / news / Alexa settings. Devices currently
+``DETECTED`` are never touched either. Event history alone does *not*
+protect a device (early versions logged events for every device); a deleted
+device's events are deleted with it.
 
 Usage (from the project directory)::
 
@@ -139,7 +141,6 @@ def _protected_sql(conn: sqlite3.Connection) -> str:
         "COALESCE(d.ip_address, '') != ''",
         "COALESCE(d.linked_to, '') != ''",
         "EXISTS (SELECT 1 FROM devices x WHERE x.linked_to = d.mac_address)",
-        "EXISTS (SELECT 1 FROM events e WHERE e.mac_address = d.mac_address)",
     ]
     parts += [f"COALESCE(d.{c}, 0) != 0" for c in _FLAG_COLUMNS if c in columns]
     parts += [f"COALESCE(d.{c}, '') NOT IN ('', '[]')" for c in _TEXT_COLUMNS if c in columns]
@@ -226,22 +227,28 @@ def purge_stale(
     deleted = 0
     while deleted < limit:
         size = min(settings.batch_size, limit - deleted)
-        rows = conn.execute(
-            f"SELECT d.mac_address FROM devices d WHERE {where} LIMIT :n",
-            {**params, "n": size},
-        ).fetchall()
-        if not rows:
-            break
-        macs = [(r[0],) for r in rows]
+        if conn.in_transaction:
+            conn.commit()
         try:
+            # Hold the write lock from select to delete so a device cannot be
+            # watchlisted/named in between and then deleted.
+            conn.execute("BEGIN IMMEDIATE")
+            rows = conn.execute(
+                f"SELECT d.mac_address FROM devices d WHERE {where} LIMIT :n",
+                {**params, "n": size},
+            ).fetchall()
+            if not rows:
+                conn.rollback()
+                break
+            macs = [(r[0],) for r in rows]
+            conn.executemany("DELETE FROM events WHERE mac_address = ?", macs)
             conn.executemany("DELETE FROM news_read WHERE mac_address = ?", macs)
             conn.executemany("DELETE FROM devices WHERE mac_address = ?", macs)
             conn.commit()
-        except sqlite3.IntegrityError:
-            # A device gained history between select and delete. Stop here;
-            # the next run will re-evaluate it as protected.
+        except sqlite3.Error as exc:
+            # e.g. database busy; the next scheduled run will pick up the rest.
             conn.rollback()
-            logger.warning("Cleanup batch skipped: a device gained history mid-run")
+            logger.warning("Cleanup batch skipped: %s", exc)
             break
         deleted += len(macs)
     return deleted
@@ -249,6 +256,10 @@ def purge_stale(
 
 def backup_database(conn: sqlite3.Connection) -> Path:
     """Copy the database to ``backups/`` beside it using SQLite's backup API."""
+    # sqlite3's backup() retries forever if this connection holds an open
+    # write transaction, so flush any pending changes first.
+    if conn.in_transaction:
+        conn.commit()
     db_file = Path(conn.execute("PRAGMA database_list").fetchone()[2])
     dest_dir = db_file.parent / "backups"
     dest_dir.mkdir(parents=True, exist_ok=True)
@@ -307,6 +318,8 @@ def run_cleanup(
     now = time.time() if now is None else now
     dry = settings.dry_run if dry_run is None else bool(dry_run)
     result["dry_run"] = dry
+    if conn.in_transaction:  # callers (the scanner) may have uncommitted writes
+        conn.commit()
 
     if dry:
         counts = preview(conn, settings, now)
