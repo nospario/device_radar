@@ -1016,6 +1016,21 @@ async def run_telegram_habit_summary_loop(config: dict[str, Any]) -> None:
 # Proximity-triggered messages
 # ---------------------------------------------------------------------------
 
+def _ble_sighting_is_fresh(dev: dict[str, Any], config: dict[str, Any], now: float) -> bool:
+    """True if the device was actually seen recently enough for its stored RSSI to mean anything.
+
+    ``last_rssi`` is the strength at the last sighting and is never cleared. A
+    device whose state is DETECTED only because a *linked* record (e.g. its
+    WiFi twin) is still home may not have been seen over Bluetooth for hours,
+    so the stored value must not be trusted. The window is the same one the
+    scanner uses to mark an unlinked device LOST, so behaviour for unlinked
+    devices is unchanged.
+    """
+    window = config.get("departure_threshold_seconds", 300)
+    last_seen = dev.get("last_seen") or 0
+    return last_seen > 0 and (now - last_seen) <= window
+
+
 async def check_proximity_devices(config: dict[str, Any], db_path: Path) -> None:
     """Check proximity-enabled devices and speak messages when RSSI conditions are met."""
     conn = bt_db.get_connection(db_path)
@@ -1042,6 +1057,10 @@ async def check_proximity_devices(config: dict[str, Any], db_path: Path) -> None
 
         rssi = dev.get("last_rssi")
         if rssi is None:
+            continue
+
+        # Ignore stale readings (the record can stay DETECTED via a linked device)
+        if not _ble_sighting_is_fresh(dev, config, now):
             continue
 
         threshold = dev.get("proximity_rssi_threshold") or -70

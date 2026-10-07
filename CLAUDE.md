@@ -200,7 +200,7 @@ Per-device BLE proximity-triggered Alexa messages. Configured on the device deta
 - **Alexa device** — which Echo to speak through (falls back to default)
 - **Prompt** — Ollama prompt for message generation
 
-Each scan cycle, `bt_alexa.check_proximity_devices()` queries devices with `proximity_enabled=1` and `state=DETECTED`, checks RSSI meets threshold and interval has elapsed, generates a message via Ollama (reuses `generate_encouragement()`), and speaks via the configured Echo. `last_proximity_message` timestamp is stored in the DB to survive restarts.
+Each scan cycle, `bt_alexa.check_proximity_devices()` queries devices with `proximity_enabled=1` and `state=DETECTED`, checks RSSI meets threshold and interval has elapsed, generates a message via Ollama (reuses `generate_encouragement()`), and speaks via the configured Echo. `last_proximity_message` timestamp is stored in the DB to survive restarts. A proximity message is only spoken if the device's Bluetooth record was actually *seen* within `departure_threshold_seconds` (`_ble_sighting_is_fresh`): `last_rssi` is never cleared, and a record can stay `DETECTED` for hours because a linked WiFi record is still home, so without this check a stale strong reading could trigger the hourly message while the person is elsewhere.
 
 ## Calendar Integration
 
