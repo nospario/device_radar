@@ -34,6 +34,18 @@ def _add_column(conn: sqlite3.Connection, table: str, column: str, coltype: str)
         pass
 
 
+def ensure_scanner_tables(conn: sqlite3.Connection) -> None:
+    """Create the tables that record when the scanner was running.
+
+    ``scanner_state`` holds a heartbeat the scanner updates every scan cycle;
+    ``scanner_gaps`` holds periods when it was not running (the Pi was off).
+    The cleanup uses them so downtime does not count towards "unseen for N days".
+    """
+    conn.execute("CREATE TABLE IF NOT EXISTS scanner_state (key TEXT PRIMARY KEY, value REAL NOT NULL)")
+    conn.execute("CREATE TABLE IF NOT EXISTS scanner_gaps (start REAL NOT NULL, end REAL NOT NULL)")
+    conn.commit()
+
+
 def _run_migration(conn: sqlite3.Connection, name: str, sql: str) -> None:
     """Run a SQL statement once, tracked by name in the migrations table."""
     if conn.execute("SELECT 1 FROM migrations WHERE name = ?", (name,)).fetchone():
@@ -160,6 +172,8 @@ def init_db(db_path: str | Path = DEFAULT_DB_PATH) -> None:
         CREATE INDEX IF NOT EXISTS idx_news_read_mac
             ON news_read(mac_address, headline_id);
     """)
+
+    ensure_scanner_tables(conn)
 
     # One-time data migrations (tracked so they never re-run)
     conn.execute("CREATE TABLE IF NOT EXISTS migrations (name TEXT PRIMARY KEY)")

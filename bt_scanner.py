@@ -282,6 +282,13 @@ class BluetoothRadarScanner:
         now = time.time()
         conn = bt_db.get_connection(self.db_path)
 
+        # Tell the cleanup we are alive, so time the Pi spends off is not
+        # counted as "unseen". Never allowed to interrupt scanning.
+        try:
+            bt_cleanup.heartbeat(conn, now)
+        except Exception:
+            logger.warning("Failed to record scanner heartbeat", exc_info=True)
+
         # Capture previous states before upserting
         prev_states: dict[str, str] = {}
         for row in conn.execute("SELECT mac_address, state FROM devices").fetchall():
@@ -740,6 +747,21 @@ def main() -> None:
 
     # Migrate config.json devices to database
     migrate_config_devices(config, db_path)
+
+    # Record any time the Pi was off since the last run (used by the cleanup)
+    try:
+        conn = bt_db.get_connection(db_path)
+        try:
+            gap = bt_cleanup.note_scanner_start(conn)
+        finally:
+            conn.close()
+        if gap:
+            logger.info(
+                "Scanner was not running for %.1f hours (until now); cleanup will not count it",
+                (gap[1] - gap[0]) / 3600,
+            )
+    except Exception:
+        logger.warning("Failed to record scanner start", exc_info=True)
 
     scanner = BluetoothRadarScanner(config)
     asyncio.run(scanner.run())

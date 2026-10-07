@@ -26,6 +26,11 @@ has been unseen for the retention period. Event history alone does *not*
 protect a device (early versions logged events for every device); a deleted
 device's events are deleted with it.
 
+"Unseen for N days" is measured in time the scanner was actually running.
+The scanner records a heartbeat each scan cycle and, on start-up, any gap
+since the last one (the Pi was off), so a month of downtime does not make
+every device look stale. See ``running_cutoff``.
+
 Usage (from the project directory)::
 
     python3 bt_cleanup.py              # show what would happen
@@ -52,6 +57,15 @@ CONFIG_PATH = Path(__file__).resolve().parent / "config.json"
 
 # Recorded in the ``migrations`` table once the pre-purge backup has been taken.
 _BACKUP_MARKER = "cleanup_pre_purge_backup"
+
+# Scanner downtime tracking. The scanner touches its heartbeat every scan cycle
+# (about every 15-30 s), so a silence longer than this means it was not running.
+_MIN_GAP_SECONDS = 120
+_HEARTBEAT_KEY = "heartbeat"
+# Past downtime is inferred once from event timestamps: a stretch of this long
+# with no events at all cannot have been the scanner running.
+_BACKFILL_MARKER = "scanner_gaps_backfill"
+_BACKFILL_MIN_GAP = 2 * 86400
 
 # Only vacuum when a run removed at least this many rows (it rewrites the file).
 _VACUUM_MIN_DELETED = 1000
@@ -133,6 +147,101 @@ def load_settings(config: dict[str, Any]) -> Settings:
 
 
 # ---------------------------------------------------------------------------
+# Scanner uptime (so downtime does not count as "unseen")
+# ---------------------------------------------------------------------------
+
+def heartbeat(conn: sqlite3.Connection, now: float | None = None) -> None:
+    """Record that the scanner is running right now."""
+    now = time.time() if now is None else now
+    bt_db.ensure_scanner_tables(conn)
+    conn.execute(
+        "INSERT INTO scanner_state (key, value) VALUES (?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        (_HEARTBEAT_KEY, now),
+    )
+    conn.commit()
+
+
+def _last_heartbeat(conn: sqlite3.Connection) -> float | None:
+    row = conn.execute(
+        "SELECT value FROM scanner_state WHERE key = ?", (_HEARTBEAT_KEY,)
+    ).fetchone()
+    return float(row[0]) if row else None
+
+
+def backfill_gaps(conn: sqlite3.Connection) -> int:
+    """Infer past downtime from event timestamps, once. Returns gaps added.
+
+    Only stretches of at least two days with no events at all are used, which
+    is long enough to be sure the scanner was off (watched phones generate
+    events every few minutes while it runs). Shorter outages in the past are
+    ignored; if anything the cleanup is then slightly too eager, never lost.
+    """
+    conn.execute("CREATE TABLE IF NOT EXISTS migrations (name TEXT PRIMARY KEY)")
+    if conn.execute("SELECT 1 FROM migrations WHERE name = ?", (_BACKFILL_MARKER,)).fetchone():
+        return 0
+    bt_db.ensure_scanner_tables(conn)
+    stamps = [r[0] for r in conn.execute("SELECT timestamp FROM events ORDER BY timestamp")]
+    added = 0
+    for a, b in zip(stamps, stamps[1:]):
+        if b - a >= _BACKFILL_MIN_GAP:
+            conn.execute("INSERT INTO scanner_gaps (start, end) VALUES (?, ?)", (a, b))
+            added += 1
+    conn.execute("INSERT OR IGNORE INTO migrations (name) VALUES (?)", (_BACKFILL_MARKER,))
+    conn.commit()
+    return added
+
+
+def note_scanner_start(conn: sqlite3.Connection, now: float | None = None) -> tuple[float, float] | None:
+    """Call once when the scanner starts. Records any downtime since its last heartbeat.
+
+    Returns the ``(start, end)`` gap that was recorded, if any. Restarts of a
+    minute or two (deploys) are ignored.
+    """
+    now = time.time() if now is None else now
+    bt_db.ensure_scanner_tables(conn)
+    backfill_gaps(conn)
+    last = _last_heartbeat(conn)
+    gap = None
+    if last is not None and now - last > _MIN_GAP_SECONDS:
+        conn.execute("INSERT INTO scanner_gaps (start, end) VALUES (?, ?)", (last, now))
+        gap = (last, now)
+    heartbeat(conn, now)
+    return gap
+
+
+def _downtime(conn: sqlite3.Connection, now: float) -> list[tuple[float, float]]:
+    """Known gaps, plus the current outage if the scanner has gone quiet."""
+    bt_db.ensure_scanner_tables(conn)
+    gaps = [(float(s), float(e)) for s, e in conn.execute("SELECT start, end FROM scanner_gaps")]
+    last = _last_heartbeat(conn)
+    if last is not None and now - last > _MIN_GAP_SECONDS:
+        gaps.append((last, now))  # not recorded yet: the scanner is down right now
+    return gaps
+
+
+def running_cutoff(gaps: list[tuple[float, float]], now: float, seconds: float) -> float:
+    """Return the wall-clock time that is ``seconds`` of *scanner running time* before ``now``.
+
+    Walks backwards from ``now``, skipping each gap. With no gaps this is
+    simply ``now - seconds``. A device whose ``last_seen`` is earlier than the
+    result has been unseen for at least ``seconds`` while the scanner was
+    watching.
+    """
+    cursor, remaining = now, float(seconds)
+    for start, end in sorted(gaps, key=lambda g: g[1], reverse=True):
+        if end >= cursor:            # this gap covers (or overlaps) where we are: jump over it
+            cursor = min(cursor, start)
+            continue
+        run = cursor - end           # running time between this gap and the cursor
+        if run >= remaining:
+            return cursor - remaining
+        remaining -= run
+        cursor = min(cursor, start)
+    return cursor - remaining
+
+
+# ---------------------------------------------------------------------------
 # Selection (SQL)
 # ---------------------------------------------------------------------------
 
@@ -172,12 +281,13 @@ def _where_hide(protected: str) -> str:
     )
 
 
-def _params(settings: Settings, now: float) -> dict[str, float]:
+def _params(conn: sqlite3.Connection, settings: Settings, now: float) -> dict[str, float]:
+    gaps = _downtime(conn, now)
     return {
-        "hide_cutoff": now - settings.hide_after_hours * 3600,
+        "hide_cutoff": running_cutoff(gaps, now, settings.hide_after_hours * 3600),
         "short_max": settings.short_lived_max_minutes * 60,
-        "short_cutoff": now - settings.delete_short_lived_after_days * 86400,
-        "other_cutoff": now - settings.delete_other_after_days * 86400,
+        "short_cutoff": running_cutoff(gaps, now, settings.delete_short_lived_after_days * 86400),
+        "other_cutoff": running_cutoff(gaps, now, settings.delete_other_after_days * 86400),
     }
 
 
@@ -197,7 +307,7 @@ def preview(conn: sqlite3.Connection, settings: Settings, now: float | None = No
     """Return counts describing what a cleanup run would do. Changes nothing."""
     now = time.time() if now is None else now
     protected = _protected_sql(conn)
-    params = _params(settings, now)
+    params = _params(conn, settings, now)
     page_count = conn.execute("PRAGMA page_count").fetchone()[0]
     page_size = conn.execute("PRAGMA page_size").fetchone()[0]
     return {
@@ -220,7 +330,7 @@ def hide_stale(conn: sqlite3.Connection, settings: Settings, now: float) -> int:
     cur = conn.execute(
         "UPDATE devices SET is_hidden = 1 WHERE mac_address IN "
         f"(SELECT d.mac_address FROM devices d WHERE {_where_hide(protected)})",
-        _params(settings, now),
+        _params(conn, settings, now),
     )
     conn.commit()
     return cur.rowcount
@@ -232,7 +342,7 @@ def purge_stale(
     """Delete stale unprotected devices in small batches. Returns rows deleted."""
     protected = _protected_sql(conn)
     where = _where_delete(protected)
-    params = _params(settings, now)
+    params = _params(conn, settings, now)
     deleted = 0
     while deleted < limit:
         size = min(settings.batch_size, limit - deleted)
@@ -340,7 +450,7 @@ def run_cleanup(
 
     if settings.backup_before_first_purge and not _backup_done(conn):
         protected = _protected_sql(conn)
-        if _count(conn, _where_delete(protected), _params(settings, now)):
+        if _count(conn, _where_delete(protected), _params(conn, settings, now)):
             try:
                 path = backup_database(conn)
             except Exception as exc:  # noqa: BLE001 - never delete without a backup
