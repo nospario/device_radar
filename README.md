@@ -38,7 +38,8 @@ Supporting modules:
 
    ```bash
    sudo pip install -r /opt/bt-monitor/requirements.txt --break-system-packages
-   sudo apt install ieee-data   # offline vendor list for identifying WiFi devices
+   sudo apt install ieee-data python3-waitress   # offline WiFi vendor list; production web server
+   sudo python3 /opt/bt-monitor/bt_auth.py set-password   # protect changes on the dashboard with a password
    ```
 
 3. **Edit the config:**
@@ -188,6 +189,7 @@ Edit `config.json` in the same directory as the scripts:
 | `rssi_threshold` | `-85` | Minimum signal strength (dBm); weaker signals are ignored |
 | `db_path` | `bt_radar.db` | Path to the SQLite database file |
 | `web_port` | `8080` | Port for the web dashboard |
+| `health_check_web_password` | `true` | Warn (in the dashboard health panel and Telegram) while no dashboard password is set |
 | `backup_enabled` | `true` | Nightly database backup to `<external drive>/device-radar-backups` (7 daily + 4 weekly kept; see CLAUDE.md, *Backups*) |
 | `backup_hour` / `backup_minute` | `3` / `30` | Time of the nightly backup (catches up if the Pi was off) |
 | `health_alerts_enabled` | `true` | Health watchdog: Telegram alerts for scanner/service/calendar/disk/temperature problems and offline always-on devices (see CLAUDE.md, *Health Watchdog*) |

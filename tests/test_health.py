@@ -44,7 +44,7 @@ class Db(unittest.TestCase):
         self.addCleanup(self.conn.close)
         # a temporary "external drive": tests must never look at the real /mnt/external
         self.external = Path(self.tmp.name) / "external"
-        self.config = {"health_external_path": str(self.external)}
+        self.config = {"health_external_path": str(self.external), "health_check_web_password": False}
 
     def fresh_backup(self, now=NOW):
         bt_backup.make_backup(self.db, self.external / bt_backup.DIR_NAME, None, now - 3600)
@@ -194,6 +194,37 @@ class BackupCheckTests(Db):
         self.assertEqual(self.check(NOW + 30 * HOUR).status, bh.OK)       # 31 h old
         self.assertEqual(self.check(NOW + 40 * HOUR).status, bh.WARN)     # 41 h old
         self.assertEqual(self.check(NOW + 80 * HOUR).status, bh.FAIL)     # 81 h old
+
+
+class WebPasswordCheckTests(Db):
+    def test_warns_until_a_password_is_set(self) -> None:
+        import bt_auth
+        auth = Path(self.tmp.name) / "web_auth.json"
+        c = bh.check_web_password({}, auth)
+        self.assertEqual((c.status, c.key), (bh.WARN, "web_password"))
+        self.assertIn("bt_auth.py set-password", c.message)
+        bt_auth.set_password(auth, "correct horse battery")
+        c = bh.check_web_password({}, auth)
+        self.assertEqual(c.status, bh.OK)
+        self.assertNotIn("correct horse", c.message)
+
+    def test_can_be_switched_off(self) -> None:
+        self.assertIsNone(bh.check_web_password({"health_check_web_password": False}, Path(self.tmp.name) / "none.json"))
+
+    def test_a_corrupt_auth_file_counts_as_no_password(self) -> None:
+        auth = Path(self.tmp.name) / "web_auth.json"
+        auth.write_text("not json")
+        self.assertEqual(bh.check_web_password({}, auth).status, bh.WARN)
+
+    def test_it_is_part_of_a_normal_pass(self) -> None:
+        auth = Path(self.tmp.name) / "web_auth.json"
+        self.heartbeat(NOW - 10)
+        self.fresh_backup()
+        conn_cfg = {"health_external_path": str(self.external)}
+        environment = env(); environment.auth_file = auth
+        asyncio.run(bh.run_once(self.db, conn_cfg, mock.AsyncMock(return_value=True), environment, NOW))
+        row = self.conn.execute("SELECT status FROM health_results WHERE key = 'web_password'").fetchone()
+        self.assertEqual(row[0], "warn")
 
 
 class AlwaysOnTests(Db):

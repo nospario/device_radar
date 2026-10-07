@@ -36,6 +36,10 @@ class WebSmokeTests(unittest.TestCase):
         original_config = bt_web.load_config
         bt_web.load_config = lambda: {}
         self.addCleanup(setattr, bt_web, "load_config", original_config)
+        # ...and never the real web_auth.json: these tests run with no password set (open dashboard)
+        original_auth = bt_web.AUTH_FILE
+        bt_web.AUTH_FILE = Path(self.tmp.name) / "no_such_web_auth.json"
+        self.addCleanup(setattr, bt_web, "AUTH_FILE", original_auth)
         self.client = bt_web.app.test_client()
 
     def test_pages_load(self) -> None:

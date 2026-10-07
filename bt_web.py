@@ -6,12 +6,18 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import secrets
 import threading
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, jsonify, redirect, render_template, request, session
+from flask.sessions import SecureCookieSessionInterface
+from itsdangerous import URLSafeTimedSerializer
 
+import bt_auth
 import bt_calendar
 import bt_cleanup
 import bt_db
@@ -30,6 +36,118 @@ app = Flask(__name__, template_folder=str(BASE_DIR / "templates"),
 
 # Stops two "Clean up now" requests (e.g. a double click) running at once.
 _cleanup_lock = threading.Lock()
+
+# ---------------------------------------------------------------------------
+# Login (see bt_auth): reading stays open, changing data needs the password
+# ---------------------------------------------------------------------------
+
+AUTH_FILE = bt_auth.AUTH_FILE
+_SAFE_METHODS = ("GET", "HEAD", "OPTIONS")
+_login_throttle = bt_auth.LoginThrottle()
+_auth_cache: dict[str, Any] = {"mtime": object(), "data": {}}
+
+_FALLBACK_KEY = secrets.token_hex(32)  # used only while no password is set; can never grant a login
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Strict",
+    PERMANENT_SESSION_LIFETIME=timedelta(days=30),
+)
+
+
+def auth_data() -> dict[str, Any]:
+    """The stored password hash/secret, re-read whenever the file changes (no restart needed)."""
+    try:
+        mtime = os.stat(AUTH_FILE).st_mtime_ns
+    except OSError:
+        mtime = None
+    if _auth_cache["mtime"] != mtime:
+        _auth_cache["mtime"] = mtime
+        _auth_cache["data"] = bt_auth.load(AUTH_FILE) if mtime is not None else {}
+    return _auth_cache["data"]
+
+
+class _AuthSessionInterface(SecureCookieSessionInterface):
+    """Signs login cookies with the stored secret, looked up when each request's session is opened.
+
+    Flask opens the session *before* before_request handlers run, so swapping ``app.secret_key``
+    from a handler would leave one request still honouring a cookie signed with the old secret.
+    Asking for the key here means changing or removing the password takes effect immediately.
+    """
+
+    def get_signing_serializer(self, app):
+        data = auth_data()
+        key = data["secret"] if bt_auth.is_configured(data) else _FALLBACK_KEY
+        return URLSafeTimedSerializer(
+            key, salt=self.salt, serializer=self.serializer,
+            signer_kwargs={"key_derivation": self.key_derivation, "digest_method": self.digest_method},
+        )
+
+
+app.session_interface = _AuthSessionInterface()
+
+
+def auth_enabled() -> bool:
+    return bt_auth.is_configured(auth_data())
+
+
+def logged_in() -> bool:
+    return auth_enabled() and session.get("auth") is True
+
+
+@app.context_processor
+def inject_auth() -> dict[str, bool]:
+    return {"auth_enabled": auth_enabled(), "logged_in": logged_in()}
+
+
+@app.before_request
+def require_login_for_changes():
+    """Block every request that changes data unless a password is unset or the user is logged in."""
+    if request.method in _SAFE_METHODS or request.path in ("/login", "/logout"):
+        return None
+    if not auth_enabled() or logged_in():
+        return None
+    return jsonify({"error": "login required", "login": "/login"}), 401
+
+
+@app.after_request
+def security_headers(response):
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "same-origin")
+    return response
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    target = bt_auth.safe_next(request.values.get("next"))
+    if request.method == "GET":
+        if logged_in():
+            return redirect(target)
+        return render_template("login.html", active="", next=target, error=None, configured=auth_enabled())
+    client = request.remote_addr or "unknown"
+    if not auth_enabled():
+        return render_template("login.html", active="", next=target, error=None, configured=False), 200
+    if not _login_throttle.allowed(client):
+        wait = max(1, _login_throttle.retry_after(client) // 60 + 1)
+        return render_template("login.html", active="", next=target, configured=True,
+                               error=f"Too many wrong passwords. Try again in about {wait} minute(s)."), 429
+    if bt_auth.check_password(auth_data(), request.form.get("password", "")):
+        _login_throttle.success(client)
+        session.clear()
+        session["auth"] = True
+        session.permanent = True
+        return redirect(target)
+    _login_throttle.failure(client)
+    logger.warning("Wrong dashboard password from %s", client)
+    return render_template("login.html", active="", next=target, configured=True,
+                           error="That password is not right."), 401
+
+
+@app.route("/logout", methods=["POST"])
+def logout():
+    session.clear()
+    return redirect("/")
+
 
 
 def load_config() -> dict[str, Any]:
@@ -509,7 +627,14 @@ def main() -> None:
     bt_db.init_db(get_db_path())
 
     logger.info("Starting Bluetooth Radar dashboard on port %d", port)
-    app.run(host="0.0.0.0", port=port, debug=False)
+    try:
+        from waitress import serve
+    except ImportError:
+        logger.warning("waitress is not installed (sudo apt install python3-waitress); "
+                       "using Flask's development server")
+        app.run(host="0.0.0.0", port=port, debug=False)
+    else:
+        serve(app, host="0.0.0.0", port=port, threads=4, ident="bt-web")
 
 
 if __name__ == "__main__":

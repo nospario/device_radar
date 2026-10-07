@@ -186,7 +186,7 @@ On first run, if `config.json` doesn't exist, a default is created and the scrip
 
 ## Web Dashboard & REST API
 
-Flask app on port 8080 with dark theme.
+Flask app on port 8080 with dark theme, served by waitress. Reads are open; changes need the dashboard password once one is set (see *Dashboard Login*).
 
 ### Pages
 - **Dashboard** (`/`) — "who's home" strip (one chip per person, decided by phones), health panel, live device list with stats, per-column filters (the Name filter also matches IP address and manufacturer), watchlist/notify toggles, and a Housekeeping panel (stale-record counts and a "Clean up now" button)
@@ -342,11 +342,24 @@ Module: `bt_backup.py`. Nightly copy of the database (and `config.json`) to `<ex
 - **Config keys** (optional): `backup_enabled` (true), `backup_hour` (3), `backup_minute` (30), `backup_keep_daily` (7), `backup_keep_weekly` (4).
 - The backups are **not encrypted** and hold your household's device history, so treat the drive accordingly.
 
+## Dashboard Login
+
+Module: `bt_auth.py`, wired into `bt_web.py`. **Reading the dashboard is open to the network; anything that changes data needs the password** (editing devices, pairing, linking, Echo settings, "Clean up now": every non-GET route). The Telegram bot only reads (`_api_get`), so it is unaffected.
+
+- **Until a password is set the dashboard is open exactly as before**, and the health watchdog warns ("Dashboard password") until one is set. Set it on the Pi, in a terminal, as root: `sudo python3 /opt/bt-monitor/bt_auth.py set-password` (also `status`, `remove`). Min 8 characters. No restart is needed: the file is re-read when it changes.
+- **Storage:** `web_auth.json` beside the code (mode 0600, git-ignored): a salted **scrypt hash** (Werkzeug) and the secret that signs login cookies. Setting a password always makes a new secret, which logs everyone out. The password itself is never stored or logged.
+- **Guard:** `require_login_for_changes` (`before_request`) returns `401 {"error": "login required", "login": "/login"}` for any non-GET request without a login, except `/login` and `/logout`. The test suite walks `app.url_map` and checks every non-GET route, so a new write endpoint cannot be added without the guard covering it. The browser helper `api()` in `static/app.js` turns a 401 into a redirect to `/login?next=<current page>`.
+- **Login** (`/login`): throttled to 5 wrong passwords per client IP per 15 minutes (`LoginThrottle`, in memory; the 6th attempt gets 429 even with the right password). `next` is restricted to paths on this site (`safe_next`: no `//host`, no scheme, no backslashes or newlines). Cookie: `HttpOnly`, `SameSite=Strict` (this is the CSRF protection; no tokens), 30 days. `/logout` is a POST form shown in the nav bar.
+- **Session signing** uses a custom session interface (`_AuthSessionInterface`) that looks up the secret when each request's session is opened. (Setting `app.secret_key` from a request handler was tried first and is wrong: Flask opens the session *before* `before_request`, so a cookie signed with the old secret was accepted for one more request after a password change or removal.)
+- **Headers** on every response: `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: same-origin`. No CSP (the templates use inline scripts and `onclick`).
+- **Server:** `bt_web.main()` serves with **waitress** (apt `python3-waitress`, 4 threads) instead of Flask's development server; if waitress is missing it logs a warning and falls back to the development server.
+- **Config:** `health_check_web_password` (default true; set false to silence the watchdog warning if you deliberately want an open dashboard).
+
 ## Health Watchdog
 
 Module: `bt_health.py`. A loop in the **Telegram bot process** (`bt-telegram`, started in `_post_init`, first pass 45 s after start) runs the checks every `health_interval_seconds` (300) and stores the latest result of each in `health_results`; alert bookkeeping is in `health_state`. It lives in the bot process, not the scanner, so it still reports if the scanner dies.
 
-**Checks:** scanner heartbeat (`scanner_state`; warn after 3 min, fail after 10), nightly **backup** freshness (see *Backups*), systemd services (`health_services`; default bt-scanner, bt-web, bt-telegram, pihole-FTL, ollama, obsidian-sync, nftables, ssh), Ollama API, **calendar login** (`bt_calendar.check_login`, every 6 h; a rejected login fails immediately, being unreachable only warns), disk space of `/` and the external drive (warn 85%, fail 95%), external drive mounted, CPU temperature (warn 80 °C, fail 85) and throttling/under-voltage *right now*, clock sync, reboot required, pending updates (`apt-get -s upgrade`, daily, warn at 50), database `PRAGMA quick_check` (daily), and **always-on devices**.
+**Checks:** scanner heartbeat (`scanner_state`; warn after 3 min, fail after 10), nightly **backup** freshness (see *Backups*), **dashboard password** set (see *Dashboard Login*), systemd services (`health_services`; default bt-scanner, bt-web, bt-telegram, pihole-FTL, ollama, obsidian-sync, nftables, ssh), Ollama API, **calendar login** (`bt_calendar.check_login`, every 6 h; a rejected login fails immediately, being unreachable only warns), disk space of `/` and the external drive (warn 85%, fail 95%), external drive mounted, CPU temperature (warn 80 °C, fail 85) and throttling/under-voltage *right now*, clock sync, reboot required, pending updates (`apt-get -s upgrade`, daily, warn at 50), database `PRAGMA quick_check` (daily), and **always-on devices**.
 
 **Always-on devices** (`devices.always_on`, "Always on" checkbox on the device page): a device is reported offline when it is not `DETECTED` and has not been seen for `health_offline_minutes` (20) of **scanner running time** (`bt_cleanup.running_cutoff`, same rule as the cleanup), so a scanner restart or a powered-off Pi never makes everything look offline.
 
@@ -415,7 +428,7 @@ ollama>=0.4.0
 
 Install: `pip install -r requirements.txt --break-system-packages`
 
-System package: `sudo apt install ieee-data` (offline WiFi vendor list used by `bt_wifi.lookup_oui_vendor`; without it only ~285 built-in vendors are recognised).
+System packages: `sudo apt install ieee-data python3-waitress` (`ieee-data`: offline WiFi vendor list used by `bt_wifi.lookup_oui_vendor`, without it only ~285 built-in vendors are recognised; `python3-waitress`: production web server for the dashboard, without it Flask's development server is used).
 
 ## File Structure
 
@@ -430,6 +443,8 @@ bt-monitor/
 ├── bt_people.py           # People, device roles, phone-only alerts, who's home
 ├── bt_health.py           # Health watchdog: checks, quiet alerting, always-on devices, restart message
 ├── bt_backup.py           # Nightly database backup to the external drive (verify, retention, CLI)
+├── bt_auth.py             # Dashboard password (scrypt hash, cookie secret, login throttle, CLI)
+├── web_auth.json          # Dashboard password hash + cookie secret (created by bt_auth.py, gitignored, 0600)
 ├── bt_alexa.py            # Alexa TTS, welcome greetings, encouragement, proximity alerts
 ├── bt_classify.py         # Device classification logic
 ├── bt_pair.py             # Bluetooth pairing helper

@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block title %}Log in - Device Radar{% endblock %}
+
+{% block content %}
+<div class="login-box">
+    <h2>Log in</h2>
+    {% if not configured %}
+    <p class="text-dim">No dashboard password is set, so nothing needs one yet. To protect changes
+    (editing devices, pairing, linking, the cleanup), run this on the Pi:</p>
+    <pre class="login-command">sudo python3 /opt/bt-monitor/bt_auth.py set-password</pre>
+    <p><a href="/">Back to the dashboard</a></p>
+    {% else %}
+    <p class="text-dim">Viewing the dashboard is open. A password is needed to change anything.</p>
+    {% if error %}<p class="login-error">{{ error }}</p>{% endif %}
+    <form method="post" action="/login" class="device-form">
+        <input type="hidden" name="next" value="{{ next }}">
+        <div class="form-group">
+            <label for="password">Password</label>
+            <input type="password" id="password" name="password" autocomplete="current-password" autofocus required>
+        </div>
+        <button type="submit" class="btn btn-primary">Log in</button>
+    </form>
+    {% endif %}
+</div>
+{% endblock %}

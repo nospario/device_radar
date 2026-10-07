@@ -6,7 +6,7 @@ report, when the scanner itself has died) and stores the latest result of every
 check in ``health_results`` for the dashboard and ``/status``.
 
 Checks: scanner heartbeat, systemd services, Ollama, calendar login (iCloud),
-nightly backup freshness, disk space (SD card and external drive), CPU temperature and throttling,
+nightly backup freshness, dashboard password set, disk space (SD card and external drive), CPU temperature and throttling,
 pending updates and reboot, clock sync, database integrity, and **always-on
 devices** (doorbell, camera, hub, ...) that have been offline too long.
 
@@ -36,6 +36,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
+import bt_auth
 import bt_backup
 import bt_cleanup
 import bt_db
@@ -267,6 +268,17 @@ def check_backup(config: dict[str, Any], ismount: Callable[[str], bool], now: fl
     return Check(key, label, OK, message)
 
 
+def check_web_password(config: dict[str, Any], auth_file: Path) -> Check | None:
+    """The dashboard should have a password, or anyone on the network can change things."""
+    if config.get("health_check_web_password", True) is False:
+        return None
+    if bt_auth.is_configured(bt_auth.load(auth_file)):
+        return Check("web_password", "Dashboard password", OK, "set; changes need a login")
+    return Check("web_password", "Dashboard password", WARN,
+                 "no password is set, so anyone on your network can change devices and run the cleanup. "
+                 "Set one with: sudo python3 /opt/bt-monitor/bt_auth.py set-password")
+
+
 def check_always_on(conn: sqlite3.Connection, now: float, minutes: float) -> list[Check]:
     """Devices flagged 'always on' that have been offline longer than ``minutes`` of running time.
 
@@ -388,6 +400,7 @@ class Environment:
     ismount: Callable[[str], bool] = os.path.ismount
     exists: Callable[[str], bool] = os.path.exists
     calendar_probe: Callable[[dict[str, Any]], tuple[str, str]] | None = None
+    auth_file: Path = bt_auth.AUTH_FILE
 
 
 def default_environment() -> Environment:
@@ -420,7 +433,7 @@ def collect(conn: sqlite3.Connection, config: dict[str, Any], settings: Settings
             checks.append(ext)
     for chk in (check_temperature(env.read_temp, settings.temp_warn, settings.temp_fail),
                 check_throttling(env.run), check_time_sync(env.run), check_reboot(env.exists),
-                check_backup(config, env.ismount, now)):
+                check_backup(config, env.ismount, now), check_web_password(config, env.auth_file)):
         if chk:
             checks.append(chk)
     checks += check_always_on(conn, now, settings.offline_minutes)

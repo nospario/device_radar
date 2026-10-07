@@ -29,6 +29,11 @@ function escapeHtml(str) {
 
 async function api(url, options) {
     const resp = await fetch(url, options);
+    if (resp.status === 401) {
+        // A password is set and this change needs a login: go there, and come back afterwards
+        window.location.href = '/login?next=' + encodeURIComponent(window.location.pathname + window.location.search);
+        throw new Error('login required');
+    }
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     return resp.json();
 }

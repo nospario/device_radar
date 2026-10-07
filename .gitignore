@@ -6,3 +6,5 @@ __pycache__/
 *.db-wal
 config.json
 .claude/
+web_auth.json
+web_auth.json.tmp
