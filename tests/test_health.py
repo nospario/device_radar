@@ -29,7 +29,9 @@ def env(**kw) -> bh.Environment:
         return {"vcgencmd": "throttled=0x0\n", "timedatectl": "yes\n", "apt-get": "Inst a\nInst b\nConf a\n"}[cmd[0]]
     defaults = dict(is_active=lambda n: "active", run=run, http_status=lambda url: 200,
                     read_temp=lambda: 45000, ismount=lambda p: True, exists=lambda p: False,
-                    calendar_probe=lambda c: ("ok", "login works"))
+                    calendar_probe=lambda c: ("ok", "login works"),
+                    sync_status=lambda: bh.SyncStatus(NOW - 20, NOW - 20, "Fully synced"),       # never read the real log in tests
+                    restart_service=lambda name: True)
     defaults.update(kw)
     return bh.Environment(**defaults)
 
@@ -44,7 +46,8 @@ class Db(unittest.TestCase):
         self.addCleanup(self.conn.close)
         # a temporary "external drive": tests must never look at the real /mnt/external
         self.external = Path(self.tmp.name) / "external"
-        self.config = {"health_external_path": str(self.external), "health_check_web_password": False}
+        self.config = {"health_external_path": str(self.external), "health_check_web_password": False,
+                       "health_check_sync": False}                # tests that exercise the sync check switch it on
 
     def fresh_backup(self, now=NOW):
         bt_backup.make_backup(self.db, self.external / bt_backup.DIR_NAME, None, now - 3600)
@@ -227,6 +230,140 @@ class WebPasswordCheckTests(Db):
         self.assertEqual(row[0], "warn")
 
 
+class SyncLogTests(unittest.TestCase):
+    def write(self, text: str) -> str:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        folder = Path(tmp.name) / "abc"
+        folder.mkdir()
+        (folder / "sync.log").write_text(text)
+        return str(Path(tmp.name) / "*" / "sync.log")
+
+    def test_reads_the_newest_fully_synced_and_the_newest_line(self) -> None:
+        pattern = self.write("[2026-10-08T11:14:55.666Z] Fully synced\n[2026-10-08T11:15:25.666Z] Fully synced\n"
+                             "                                        [2026-10-08T11:17:18.611Z] Starting sync:\n"
+                             "[2026-10-08T11:17:18.881Z] Connecting...\n")
+        status = bh.read_sync_status(pattern)
+        self.assertEqual(status.last_synced, bh.datetime.fromisoformat("2026-10-08T11:15:25.666+00:00").timestamp())
+        self.assertEqual(status.last_line, bh.datetime.fromisoformat("2026-10-08T11:17:18.881+00:00").timestamp())
+        self.assertEqual(status.last_text, "Connecting...")
+
+    def test_a_healthy_log_ends_on_fully_synced(self) -> None:
+        status = bh.read_sync_status(self.write("[2026-10-08T11:15:25.666Z] Uploading file x\n[2026-10-08T11:15:55.666Z] Fully synced\n"))
+        self.assertEqual(status.last_synced, status.last_line)
+
+    def test_never_synced_no_log_and_junk(self) -> None:
+        self.assertIsNone(bh.read_sync_status(self.write("[2026-10-08T11:17:18.881Z] Connecting...\n")).last_synced)
+        self.assertIsNone(bh.read_sync_status("/nonexistent/*/sync.log"))
+        status = bh.read_sync_status(self.write("garbage\n[not a time] Fully synced\n[2026-13-45T99:99:99Z] x\n"))
+        self.assertIsNone(status.last_line)
+
+    def test_only_the_tail_of_a_huge_log_is_read(self) -> None:
+        old = "[2026-10-01T00:00:00.000Z] Fully synced\n" * 20000
+        pattern = self.write(old + "[2026-10-08T11:15:25.666Z] Fully synced\n")
+        status = bh.read_sync_status(pattern, tail_bytes=4096)
+        self.assertEqual(status.last_synced, bh.datetime.fromisoformat("2026-10-08T11:15:25.666+00:00").timestamp())
+
+
+class ObsidianSyncCheckTests(Db):
+    def check(self, status, *, config=None, active="active", restart=None, now=NOW, **setting_kw):
+        calls = restart if restart is not None else []
+        environment = env(is_active=lambda n: active, sync_status=lambda: status,
+                          restart_service=lambda name: (calls.append(name), True)[1])
+        settings = bh.load_settings({**(config or {}), **setting_kw})
+        return bh.check_obsidian_sync(self.conn, {**(config or {})}, settings, environment, now), calls
+
+    def test_a_recent_fully_synced_is_ok_and_never_restarts(self) -> None:
+        chk, calls = self.check(bh.SyncStatus(NOW - 40, NOW - 40, "Fully synced"))
+        self.assertEqual((chk.status, calls), (bh.OK, []))
+        self.assertIn("in sync", chk.message)
+
+    def test_a_clock_slightly_behind_is_not_a_problem(self) -> None:
+        chk, calls = self.check(bh.SyncStatus(NOW + 30, NOW + 30, "Fully synced"))
+        self.assertEqual((chk.status, calls), (bh.OK, []))
+
+    def test_busy_uploading_is_not_a_problem(self) -> None:
+        chk, calls = self.check(bh.SyncStatus(NOW - 30 * 60, NOW - 20, "Uploading file big.png"))
+        self.assertEqual((chk.status, chk.message, calls), (bh.OK, "busy syncing", []))
+
+    def test_quiet_for_too_long_restarts_the_service_once_and_says_so(self) -> None:
+        stuck = bh.SyncStatus(NOW - 20 * 60, NOW - 3 * 60, "Connecting...")
+        chk, calls = self.check(stuck)
+        self.assertEqual(calls, ["obsidian-sync"])
+        self.assertEqual(chk.status, bh.WARN)
+        self.assertIn("20 min", chk.message)
+        self.assertIn("Connecting...", chk.message)
+        self.assertIn("restarted the service", chk.message)
+        self.assertEqual(chk.confirm, 1)                               # already time-based: no second look needed
+
+    def test_not_restarted_again_during_the_cooldown(self) -> None:
+        stuck = bh.SyncStatus(NOW - 20 * 60, NOW - 10 * 60, "Connecting...")
+        self.check(stuck)
+        chk, calls = self.check(stuck, now=NOW + 10 * 60)
+        self.assertEqual(calls, [])
+        self.assertEqual(chk.status, bh.WARN)
+        self.assertIn("giving it time", chk.message)
+
+    def test_restarts_again_after_the_cooldown_but_gives_up_after_the_limit(self) -> None:
+        stuck = lambda t: bh.SyncStatus(t - 60 * 60, t - 20 * 60, "Connecting...")
+        total = []
+        for i in range(3):
+            now = NOW + i * 31 * 60
+            chk, calls = self.check(stuck(now), now=now)
+            total += calls
+        self.assertEqual(len(total), 3)
+        now = NOW + 3 * 31 * 60
+        chk, calls = self.check(stuck(now), now=now)
+        self.assertEqual((calls, chk.status), ([], bh.FAIL))
+        self.assertIn("restarted 3 times", chk.message)
+
+    def test_recovery_resets_the_restart_count(self) -> None:
+        stuck = bh.SyncStatus(NOW - 20 * 60, NOW - 10 * 60, "Connecting...")
+        self.check(stuck)
+        later = NOW + 2 * HOUR
+        chk, _ = self.check(bh.SyncStatus(later - 10, later - 10, "Fully synced"), now=later)
+        self.assertEqual(chk.status, bh.OK)
+        self.assertEqual(bh._state_get(self.conn, "sync_restarts"), 0)
+        chk, calls = self.check(bh.SyncStatus(later + 3 * HOUR - 20 * 60, later + 3 * HOUR - 10 * 60, "x"), now=later + 3 * HOUR)
+        self.assertEqual(calls, ["obsidian-sync"])                      # a fresh problem gets a fresh restart
+
+    def test_auto_restart_can_be_turned_off(self) -> None:
+        chk, calls = self.check(bh.SyncStatus(NOW - 20 * 60, NOW - 10 * 60, "x"), config={"health_sync_auto_restart": False})
+        self.assertEqual((chk.status, calls), (bh.FAIL, []))
+        self.assertIn("automatic restart is off", chk.message)
+
+    def test_dry_run_never_restarts(self) -> None:
+        chk, calls = self.check(bh.SyncStatus(NOW - 20 * 60, NOW - 10 * 60, "x"), config={"health_alerts_dry_run": True})
+        self.assertEqual(calls, [])
+        self.assertIn("dry run", chk.message)
+
+    def test_a_failed_restart_is_reported_as_a_failure(self) -> None:
+        environment = env(sync_status=lambda: bh.SyncStatus(NOW - 20 * 60, NOW - 10 * 60, "x"), restart_service=lambda n: False)
+        chk = bh.check_obsidian_sync(self.conn, {}, bh.load_settings({}), environment, NOW)
+        self.assertEqual(chk.status, bh.FAIL)
+        self.assertIn("failed", chk.message)
+
+    def test_a_stopped_service_is_left_to_the_service_check(self) -> None:
+        chk, calls = self.check(bh.SyncStatus(NOW - 3600, NOW - 3600, "x"), active="failed")
+        self.assertEqual((chk, calls), (None, []))
+
+    def test_can_be_switched_off_and_a_missing_log_only_warns(self) -> None:
+        self.assertIsNone(self.check(bh.SyncStatus(NOW - 3600, NOW - 3600, "x"), config={"health_check_sync": False})[0])
+        chk, calls = self.check(None)
+        self.assertEqual((chk.status, calls), (bh.WARN, []))
+
+    def test_never_synced_since_start_counts_as_quiet(self) -> None:
+        chk, calls = self.check(bh.SyncStatus(None, NOW - 10 * 60, "Connecting..."))
+        self.assertEqual(calls, ["obsidian-sync"])
+        self.assertIn("never reported", chk.message)
+
+    def test_settings_are_read_and_bad_values_ignored(self) -> None:
+        s = bh.load_settings({"health_sync_stale_minutes": 20, "health_sync_max_restarts": 5, "health_sync_auto_restart": False})
+        self.assertEqual((s.sync_stale_minutes, s.sync_max_restarts, s.sync_auto_restart), (20.0, 5, False))
+        d = bh.load_settings({"health_sync_stale_minutes": "x", "health_sync_max_restarts": -2, "health_sync_auto_restart": "yes"})
+        self.assertEqual((d.sync_stale_minutes, d.sync_max_restarts, d.sync_auto_restart), (10.0, 3, True))
+
+
 class AlwaysOnTests(Db):
     def test_online_and_recently_seen_devices_are_ok(self) -> None:
         self.device("AA:00:00:00:00:01", "Doorbell")
@@ -365,6 +502,24 @@ class RunOnceTests(Db):
         self.assertEqual(len(lines2), 2)                       # the two services, confirmed now
         self.assertEqual(send2.await_count, 1)
         self.assertIn("ollama", send2.await_args.args[0])
+
+    def test_a_stuck_sync_is_restarted_and_reported_in_one_run_then_recovery_is_announced(self) -> None:
+        self.heartbeat(NOW - 10)
+        restarts = []
+        stuck = env(sync_status=lambda: bh.SyncStatus(NOW - 20 * 60, NOW - 10 * 60, "Connecting..."),
+                    restart_service=lambda n: (restarts.append(n), True)[1])
+        lines, send = self.run_once({"health_check_sync": True}, environment=stuck)
+        self.assertEqual(restarts, ["obsidian-sync"])
+        self.assertEqual(len(lines), 1)
+        self.assertIn("Obsidian sync", lines[0])
+        self.assertIn("restarted the service", send.await_args.args[0])
+        later = NOW + 300
+        healthy = env(sync_status=lambda: bh.SyncStatus(later - 20, later - 20, "Fully synced"))
+        lines, send = self.run_once({"health_check_sync": True}, environment=healthy, now=later)
+        self.assertEqual(len(lines), 1)
+        self.assertIn("back to normal", lines[0])
+        keys = {r[0] for r in self.conn.execute("SELECT key FROM health_results")}
+        self.assertIn("sync", keys)
 
     def test_disabled_does_nothing(self) -> None:
         lines, send = self.run_once({"health_alerts_enabled": False})

@@ -6,7 +6,8 @@ report, when the scanner itself has died) and stores the latest result of every
 check in ``health_results`` for the dashboard and ``/status``.
 
 Checks: scanner heartbeat, systemd services, Ollama, calendar login (iCloud),
-nightly backup freshness, dashboard password set, disk space (SD card and external drive), CPU temperature and throttling,
+nightly backup freshness, **Obsidian sync** alive (restarted automatically if it goes quiet),
+dashboard password set, disk space (SD card and external drive), CPU temperature and throttling,
 pending updates and reboot, clock sync, database integrity, and **always-on
 devices** (doorbell, camera, hub, ...) that have been offline too long.
 
@@ -24,6 +25,7 @@ HTTP getter) so it can be tested without a Pi.
 from __future__ import annotations
 
 import asyncio
+import glob
 import html
 import logging
 import os
@@ -33,6 +35,7 @@ import sqlite3
 import subprocess
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
@@ -79,6 +82,10 @@ class Settings:
     calendar_hours: float = 6.0
     updates_hours: float = 24.0
     database_hours: float = 24.0
+    sync_stale_minutes: float = 10.0
+    sync_auto_restart: bool = True
+    sync_restart_cooldown_minutes: float = 30.0
+    sync_max_restarts: int = 3
 
 
 def _int(value: Any, default: int, minimum: int = 1) -> int:
@@ -108,6 +115,12 @@ def load_settings(config: dict[str, Any]) -> Settings:
         updates_warn=_int(config.get("health_updates_warn"), d.updates_warn),
         offline_minutes=_num(config.get("health_offline_minutes"), d.offline_minutes, 1),
         external_path=str(config.get("health_external_path") or d.external_path),
+        sync_stale_minutes=_num(config.get("health_sync_stale_minutes"), d.sync_stale_minutes, 2),
+        sync_auto_restart=(config["health_sync_auto_restart"] if isinstance(config.get("health_sync_auto_restart"), bool)
+                           else d.sync_auto_restart),
+        sync_restart_cooldown_minutes=_num(config.get("health_sync_restart_cooldown_minutes"),
+                                           d.sync_restart_cooldown_minutes, 1),
+        sync_max_restarts=_int(config.get("health_sync_max_restarts"), d.sync_max_restarts, 1),
     )
 
 
@@ -268,6 +281,114 @@ def check_backup(config: dict[str, Any], ismount: Callable[[str], bool], now: fl
     return Check(key, label, OK, message)
 
 
+# ---------------------------------------------------------------------------
+# Obsidian sync
+# ---------------------------------------------------------------------------
+
+SYNC_LOG_GLOB = "/home/nospario/.config/obsidian-headless/sync/*/sync.log"
+SYNC_SERVICE = "obsidian-sync"
+_SYNC_LINE = re.compile(r"\[(\d{4}-\d\d-\d\dT[\d:.]+Z)\]\s?(.*)")
+
+
+@dataclass
+class SyncStatus:
+    """What the headless sync's own log says. It writes "Fully synced" about every 30 seconds while healthy."""
+
+    last_synced: float | None      # newest "Fully synced" line (epoch)
+    last_line: float | None        # newest timestamped line of any kind (epoch)
+    last_text: str = ""            # that line
+
+
+def read_sync_status(pattern: str = SYNC_LOG_GLOB, tail_bytes: int = 65536) -> SyncStatus | None:
+    """Parse the end of the newest sync log, or None if there is no log."""
+    files = glob.glob(pattern)
+    if not files:
+        return None
+    path = max(files, key=os.path.getmtime)
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            f.seek(max(0, f.tell() - tail_bytes))
+            text = f.read().decode("utf-8", "replace")
+    except OSError:
+        return None
+    synced = line = None
+    last_text = ""
+    for raw in text.splitlines():
+        match = _SYNC_LINE.search(raw)
+        if not match:
+            continue
+        try:
+            ts = datetime.fromisoformat(match.group(1).replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            continue
+        line, last_text = ts, match.group(2).strip()
+        if "fully synced" in last_text.lower():
+            synced = ts
+    return SyncStatus(synced, line, last_text)
+
+
+def _state_get(conn: sqlite3.Connection, key: str, default: float = 0.0) -> float:
+    bt_db.ensure_scanner_tables(conn)
+    row = conn.execute("SELECT value FROM scanner_state WHERE key = ?", (key,)).fetchone()
+    try:
+        return float(row[0]) if row else default
+    except (TypeError, ValueError):
+        return default
+
+
+def _state_set(conn: sqlite3.Connection, key: str, value: float) -> None:
+    bt_db.ensure_scanner_tables(conn)
+    conn.execute("INSERT INTO scanner_state (key, value) VALUES (?, ?) "
+                 "ON CONFLICT(key) DO UPDATE SET value = excluded.value", (key, float(value)))
+    conn.commit()
+
+
+def check_obsidian_sync(conn: sqlite3.Connection, config: dict[str, Any], settings: Settings,
+                        env: "Environment", now: float) -> Check | None:
+    """Is the Pi still exchanging notes with Obsidian? The Pebble sorter and the habit reminders both depend
+    on it, and it can stall silently (it did, after a reboot, stuck at "Connecting..."). If the log has not
+    said "Fully synced" for ``sync_stale_minutes``, restart the service (with a cooldown and a limit), and say so."""
+    if config.get("health_check_sync") is False:
+        return None
+    if env.is_active(SYNC_SERVICE) != "active":
+        return None                                    # the service check already reports a stopped service
+    status = env.sync_status()
+    if status is None or status.last_line is None:
+        return Check("sync", "Obsidian sync", WARN, "no sync log found", confirm=2)
+    age_line = now - status.last_line
+    age_sync = None if status.last_synced is None else now - status.last_synced
+    if age_sync is not None and age_sync <= settings.sync_stale_minutes * 60:
+        if _state_get(conn, "sync_restarts") > 0:
+            _state_set(conn, "sync_restarts", 0)
+        return Check("sync", "Obsidian sync", OK, f"in sync (last confirmed {_ago(max(age_sync, 0))} ago)", confirm=1)
+    if age_line <= 120:
+        return Check("sync", "Obsidian sync", OK, "busy syncing", confirm=1)
+
+    quiet = f"no \"Fully synced\" for {_ago(age_sync)}" if age_sync is not None else "has never reported \"Fully synced\""
+    problem = f"{quiet} (last log line: \"{status.last_text[:60]}\")"
+    restarts = int(_state_get(conn, "sync_restarts"))
+    since_restart = now - _state_get(conn, "sync_restart_at")
+    if not settings.sync_auto_restart:
+        return Check("sync", "Obsidian sync", FAIL, f"{problem}; automatic restart is off", confirm=1)
+    if restarts >= settings.sync_max_restarts:
+        return Check("sync", "Obsidian sync", FAIL,
+                     f"{problem}; restarted {restarts} times without fixing it, so it needs a look", confirm=1)
+    if since_restart < settings.sync_restart_cooldown_minutes * 60:
+        return Check("sync", "Obsidian sync", WARN,
+                     f"{problem}; restarted {_ago(since_restart)} ago, giving it time", confirm=1)
+    if settings.dry_run:
+        return Check("sync", "Obsidian sync", WARN, f"{problem}; [dry run] would restart the service", confirm=1)
+    worked = env.restart_service(SYNC_SERVICE)
+    _state_set(conn, "sync_restart_at", now)
+    _state_set(conn, "sync_restarts", restarts + 1)
+    logger.warning("Obsidian sync quiet for %s: restarted %s (%s)", _ago(age_sync or 0), SYNC_SERVICE,
+                   "ok" if worked else "FAILED")
+    return Check("sync", "Obsidian sync", WARN if worked else FAIL,
+                 f"{problem}; " + ("restarted the service" if worked else "tried to restart the service but it failed"),
+                 confirm=1)
+
+
 def check_web_password(config: dict[str, Any], auth_file: Path) -> Check | None:
     """The dashboard should have a password, or anyone on the network can change things."""
     if config.get("health_check_web_password", True) is False:
@@ -380,6 +501,13 @@ def _is_active(name: str) -> str:
         return "unknown"
 
 
+def _restart_service(name: str) -> bool:
+    try:
+        return subprocess.run(["systemctl", "restart", name], capture_output=True, text=True, timeout=90).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
 def _http_status(url: str) -> int:
     import httpx
     return httpx.get(url, timeout=5).status_code
@@ -401,6 +529,8 @@ class Environment:
     exists: Callable[[str], bool] = os.path.exists
     calendar_probe: Callable[[dict[str, Any]], tuple[str, str]] | None = None
     auth_file: Path = bt_auth.AUTH_FILE
+    sync_status: Callable[[], SyncStatus | None] = read_sync_status
+    restart_service: Callable[[str], bool] = lambda name: _restart_service(name)
 
 
 def default_environment() -> Environment:
@@ -433,7 +563,8 @@ def collect(conn: sqlite3.Connection, config: dict[str, Any], settings: Settings
             checks.append(ext)
     for chk in (check_temperature(env.read_temp, settings.temp_warn, settings.temp_fail),
                 check_throttling(env.run), check_time_sync(env.run), check_reboot(env.exists),
-                check_backup(config, env.ismount, now), check_web_password(config, env.auth_file)):
+                check_backup(config, env.ismount, now), check_web_password(config, env.auth_file),
+                check_obsidian_sync(conn, config, settings, env, now)):
         if chk:
             checks.append(chk)
     checks += check_always_on(conn, now, settings.offline_minutes)
