@@ -663,6 +663,19 @@ def ignore_before(config: dict[str, Any], person: str, tz: tzinfo | None = None)
     return None
 
 
+def visitors(config: dict[str, Any]) -> set[str]:
+    """People who visit rather than live here (``presence_visitors``: ["ava"]).
+
+    They stay in the who's-home strip and still get arrival/departure alerts, but are left out of the
+    reports, predictions, late alerts and the "house is empty" figures, which describe the household.
+    A value that is not a list is ignored.
+    """
+    raw = config.get("presence_visitors")
+    if not isinstance(raw, (list, tuple)):
+        return set()
+    return {k for k in (bt_people.normalise_person(v) for v in raw if isinstance(v, str)) if k}
+
+
 def _signal(devices: list[dict[str, Any]]) -> str:
     kinds = {("WiFi" if "wifi" in (d.get("scan_type") or "").lower() else "Bluetooth") for d in devices}
     return "WiFi + Bluetooth" if len(kinds) == 2 else (kinds.pop() if kinds else "none")
@@ -703,7 +716,10 @@ def analyse(conn: sqlite3.Connection, config: dict[str, Any], now: float | None 
     db = _db_path(conn)
 
     result: dict[str, PersonData] = {}
+    away_for_good = visitors(config)
     for person, devices in bt_people.phone_groups(conn, config).items():
+        if person in away_for_good:
+            continue
         macs = [d["mac_address"] for d in devices]
         marks = ",".join("?" * len(macs))
         count, newest = conn.execute(

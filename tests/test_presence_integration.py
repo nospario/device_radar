@@ -71,6 +71,48 @@ class Household(unittest.TestCase):
             self.add_event("arrived", o.back, mac)
 
 
+class VisitorTests(Household):
+    VISITOR = "AA:00:00:00:00:0F"
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.add_phone("Vic's iPhone", mac=self.VISITOR)
+        self.add_events(tp.weekday_outings(90), mac=self.VISITOR)
+        bp._session_cache.clear()
+
+    def test_everyone_with_a_phone_is_reported_by_default(self) -> None:
+        self.assertEqual(sorted(bp.build_report(self.conn, {}, NOW)["persons"][i]["person"] for i in (0, 1)), ["sam", "vic"])
+
+    def test_a_visitor_is_left_out_of_reports_predictions_and_the_household(self) -> None:
+        cfg = {"presence_visitors": ["Vic"]}
+        report = bp.build_report(self.conn, cfg, NOW)
+        self.assertEqual([p["person"] for p in report["persons"]], ["sam"])
+        self.assertNotIn("vic", bp.analyse(self.conn, cfg, NOW))
+        self.assertNotIn("vic", bp.eta_for_people(self.conn, cfg, NOW))
+        self.assertEqual(report["household"]["people"], ["sam"])
+        self.assertNotIn("Vic", report["untracked"])
+
+    def test_a_visitor_still_shows_in_the_people_status_and_keeps_alerts(self) -> None:
+        import bt_people
+        cfg = {"presence_visitors": ["vic"]}
+        self.assertIn("vic", [p["person"] for p in bt_people.people_status(self.conn, cfg, NOW)])
+        self.conn.execute("UPDATE devices SET is_notify = 1 WHERE mac_address = ?", (self.VISITOR,))
+        self.conn.commit()
+        phone = dict(self.conn.execute("SELECT * FROM devices WHERE mac_address = ?", (self.VISITOR,)).fetchone())
+        self.assertTrue(bt_people.notify_allowed(cfg, [phone]))
+
+    def test_names_are_matched_loosely_and_bad_values_ignored(self) -> None:
+        self.assertEqual(bp.visitors({"presence_visitors": [" VIC ", "", 5, None, "Ava"]}), {"vic", "ava"})
+        for junk in (None, "vic", 5, {"vic": 1}):
+            self.assertEqual(bp.visitors({"presence_visitors": junk}), set())
+            self.assertIn("vic", bp.analyse(self.conn, {"presence_visitors": junk}, NOW))
+
+    def test_changing_the_setting_takes_effect_at_once(self) -> None:
+        self.assertIn("vic", bp.analyse(self.conn, {}, NOW))
+        self.assertNotIn("vic", bp.analyse(self.conn, {"presence_visitors": ["vic"]}, NOW))
+        self.assertIn("vic", bp.analyse(self.conn, {}, NOW))
+
+
 class PredictiveAnswerTests(Household):
     def ask(self, text, now=NOW):
         return asyncio.run(tg.answer_presence(text, {}, self.db, now))
