@@ -18,6 +18,8 @@ import re
 from datetime import date
 from pathlib import Path
 
+import bt_logging
+
 logger = logging.getLogger("bt_tasks")
 
 DEFAULT_MASTER_PATH = (
@@ -395,11 +397,7 @@ def _cli() -> int:
     )
 
     args = parser.parse_args()
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
+    bt_logging.setup(logging.INFO, "%(asctime)s [%(levelname)s] %(message)s", "%Y-%m-%d %H:%M:%S")
 
     if args.cmd == "complete-habits":
         count = complete_todays_habits(args.daily_notes_dir)

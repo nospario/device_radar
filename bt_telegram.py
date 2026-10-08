@@ -18,6 +18,7 @@ import httpx
 
 import bt_backup
 import bt_db
+import bt_logging
 import bt_health
 import bt_newdevice
 import bt_people
@@ -1367,11 +1368,7 @@ async def _handle_message(update, context) -> None:
 
 def main() -> None:
     """Run the Telegram bot."""
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        datefmt="%H:%M:%S",
-    )
+    bt_logging.setup(logging.INFO, "%(asctime)s [%(levelname)s] %(name)s: %(message)s", "%H:%M:%S")
 
     if not _HAS_TELEGRAM_LIB:
         logger.error(

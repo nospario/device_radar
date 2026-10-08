@@ -21,6 +21,7 @@ import bt_auth
 import bt_calendar
 import bt_cleanup
 import bt_db
+import bt_logging
 import bt_health
 import bt_news
 import bt_pair
@@ -639,11 +640,7 @@ def api_delete_echo_device(name: str):
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(message)s",
-        datefmt="%H:%M:%S",
-    )
+    bt_logging.setup(logging.INFO, "%(asctime)s [%(levelname)s] %(message)s", "%H:%M:%S")
 
     config = load_config()
     port = config.get("web_port", 8080)

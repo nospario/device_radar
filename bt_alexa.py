@@ -18,6 +18,7 @@ import httpx
 
 import bt_calendar
 import bt_db
+import bt_logging
 import bt_news
 import bt_tasks
 import bt_telegram
@@ -1124,11 +1125,7 @@ if __name__ == "__main__":
     import argparse
     import sys
 
-    logging.basicConfig(
-        level=logging.DEBUG,
-        format="%(asctime)s [%(levelname)s] %(message)s",
-        datefmt="%H:%M:%S",
-    )
+    bt_logging.setup(logging.DEBUG, "%(asctime)s [%(levelname)s] %(message)s", "%H:%M:%S")
 
     parser = argparse.ArgumentParser(description="Test Alexa welcome announcement")
     parser.add_argument("--test", metavar="NAME", help="Person name to test with")

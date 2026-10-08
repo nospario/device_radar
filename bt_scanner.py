@@ -24,6 +24,7 @@ import bt_alexa
 import bt_classify
 import bt_cleanup
 import bt_db
+import bt_logging
 import bt_health
 import bt_newdevice
 import bt_pair
@@ -725,11 +726,7 @@ class BluetoothRadarScanner:
 # ---------------------------------------------------------------------------
 
 def setup_logging(debug: bool = False) -> None:
-    logging.basicConfig(
-        level=logging.DEBUG if debug else logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(message)s",
-        datefmt="%H:%M:%S",
-    )
+    bt_logging.setup(logging.DEBUG if debug else logging.INFO, "%(asctime)s [%(levelname)s] %(message)s", "%H:%M:%S")
 
 
 def main() -> None:

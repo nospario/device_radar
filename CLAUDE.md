@@ -406,6 +406,7 @@ sudo python3 bt_scanner.py --discover-wifi   # WiFi/LAN devices
 - Default level: INFO
 - Format: `%(asctime)s [%(levelname)s] %(message)s` with `%H:%M:%S` time
 - Telegram bot uses: `%(asctime)s [%(levelname)s] %(name)s: %(message)s`
+- Every entry point sets logging up through `bt_logging.setup(...)`, never `logging.basicConfig` directly. The Telegram bot token is part of every Bot API URL, so `httpx`/`httpcore` are held at WARNING (they logged one line with the full URL per request) and all log output passes through a formatter that replaces `bot<id>:<secret>` with `bot<redacted>`, which also covers exception text.
 
 ## Systemd Services
 
@@ -464,6 +465,7 @@ bt-monitor/
 ├── bt_newdevice.py        # New WiFi device alerts + tap-to-name from Telegram
 ├── bt_people.py           # People, device roles, phone-only alerts, who's home
 ├── bt_presence.py         # Presence analytics: sessions, reports, trends, arrival predictions, late alerts
+├── bt_logging.py          # Shared logging setup: quiet HTTP libraries, redact bot tokens
 ├── bt_health.py           # Health watchdog: checks, quiet alerting, always-on devices, restart message
 ├── bt_backup.py           # Nightly database backup to the external drive (verify, retention, CLI)
 ├── bt_auth.py             # Dashboard password (scrypt hash, cookie secret, login throttle, CLI)
