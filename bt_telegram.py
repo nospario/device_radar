@@ -285,6 +285,8 @@ def predictive_answer(conn, config: dict[str, Any], person: str, question: str =
                       now: float | None = None) -> str:
     """Answer "when will X be home / when does X usually leave?" from the presence statistics."""
     now = time.time() if now is None else now
+    if bt_people.normalise_person(person) in bt_presence.visitors(config):
+        return f"{person.title()} is a visitor, so I don't predict when they will be home."
     data = bt_presence.analyse(conn, config, now).get(person)
     if data is None:
         return f"No phone is tracked for {person.title()}, so I can't say."
@@ -766,7 +768,8 @@ async def _cmd_eta(update, context) -> None:
             else:
                 await update.message.reply_text(predictive_answer(conn, config, entry["person"], "when will they be home"))
             return
-        away = [p for p in bt_people.people_status(conn, config) if p["state"] == "away"]
+        guests = bt_presence.visitors(config)
+        away = [p for p in bt_people.people_status(conn, config) if p["state"] == "away" and p["person"] not in guests]
         if not away:
             await update.message.reply_text("Everyone with a tracked phone is home.")
             return

@@ -147,6 +147,11 @@ class PredictiveAnswerTests(Household):
     def test_someone_with_no_phone_is_told_so(self) -> None:
         self.assertIn("No phone is tracked for Kim", self.ask("when will Kim be home?"))
 
+    def test_a_visitor_is_not_predicted_in_chat_either(self) -> None:
+        self.add_phone("Vic's iPhone", state="LOST", mac="AA:00:00:00:00:0F")
+        answer = tg.predictive_answer(self.conn, {"presence_visitors": ["vic"]}, "vic", "when will they be home", NOW)
+        self.assertEqual(answer, "Vic is a visitor, so I don't predict when they will be home.")
+
     def test_unknown_people_fall_through_to_the_old_answer(self) -> None:
         self.assertIn("I don't know who", self.ask("when will Zed be home?"))
 
@@ -172,6 +177,8 @@ class PredictiveAnswerTests(Household):
 
 
 class EtaCommandTests(Household):
+    CONFIG: dict = {}
+
     def run_cmd(self, args):
         replies = []
 
@@ -180,7 +187,7 @@ class EtaCommandTests(Household):
 
         update = SimpleNamespace(message=SimpleNamespace(reply_text=reply_text), effective_chat=SimpleNamespace(id=1))
         patches = [mock.patch.object(tg, "_is_authorized", lambda _id: True), mock.patch.object(tg, "_get_db_path", lambda: self.db),
-                   mock.patch.object(tg, "load_config", lambda: {}), mock.patch("time.time", return_value=NOW)]
+                   mock.patch.object(tg, "load_config", lambda: self.CONFIG), mock.patch("time.time", return_value=NOW)]
         for p in patches:
             p.start()
         try:
@@ -201,6 +208,32 @@ class EtaCommandTests(Household):
     def test_unknown_and_phoneless_names(self) -> None:
         self.assertIn("don't know who", self.run_cmd(["zed"])[0])
         self.assertIn("No phone is tracked for Kim", self.run_cmd(["kim"])[0])
+
+    def test_visitors_are_left_out_of_the_list_and_not_predicted(self) -> None:
+        self.add_phone("Vic's iPhone", state="LOST", mac="AA:00:00:00:00:0F")
+        self.add_events(tp.weekday_outings(90), mac="AA:00:00:00:00:0F")
+        self.add_event("departed", tp.ts(2026, 10, 7, 8, 0), mac="AA:00:00:00:00:0F")
+        (everyone,) = self.run_cmd([])
+        self.assertIn("Vic is expected home", everyone)
+        type(self).CONFIG = {"presence_visitors": ["vic"]}
+        try:
+            (text,) = self.run_cmd([])
+            self.assertIn("Sam is expected home", text)
+            self.assertNotIn("Vic", text)
+            self.assertIn("Vic is a visitor", self.run_cmd(["vic"])[0])
+            self.assertNotIn("expected", self.run_cmd(["vic"])[0])
+        finally:
+            type(self).CONFIG = {}
+
+    def test_when_only_a_visitor_is_out_nobody_is_listed(self) -> None:
+        self.conn.execute("UPDATE devices SET state='DETECTED' WHERE mac_address=?", (PHONE,))
+        self.conn.commit()
+        self.add_phone("Vic's iPhone", state="LOST", mac="AA:00:00:00:00:0F")
+        type(self).CONFIG = {"presence_visitors": ["vic"]}
+        try:
+            self.assertEqual(self.run_cmd([]), ["Everyone with a tracked phone is home."])
+        finally:
+            type(self).CONFIG = {}
 
     def test_when_everyone_is_home(self) -> None:
         self.conn.execute("UPDATE devices SET state='DETECTED' WHERE mac_address=?", (PHONE,))
