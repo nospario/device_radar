@@ -78,6 +78,7 @@ class Settings:
     late_people: tuple[str, ...] = ()
     late_margin_minutes: float = 30.0
     weekday_boost: float | None = None      # None = decide by testing; a number forces it (1 = off)
+    night_quiet: bool = True                # a gap that starts 00:00-03:59 and ends before noon is the phone asleep, not an outing
 
 
 def _num(value: Any, default: float, low: float, high: float) -> float:
@@ -93,6 +94,7 @@ def load_settings(config: dict[str, Any]) -> Settings:
     enabled, dry = config.get("late_alerts_enabled"), config.get("late_alerts_dry_run")
     samples = config.get("presence_min_samples")
     boost = config.get("presence_weekday_boost")
+    quiet = config.get("presence_night_quiet")
     forced = float(boost) if isinstance(boost, (int, float)) and not isinstance(boost, bool) and 1 <= boost <= 20 else None
     return Settings(
         flap_minutes=_num(config.get("presence_flap_minutes"), d.flap_minutes, 1, 240),
@@ -107,6 +109,7 @@ def load_settings(config: dict[str, Any]) -> Settings:
         late_people=tuple(bt_people.normalise_person(p) or "" for p in people if bt_people.normalise_person(p)),
         late_margin_minutes=_num(config.get("late_alerts_margin_minutes"), d.late_margin_minutes, 0, 600),
         weekday_boost=forced,
+        night_quiet=quiet if isinstance(quiet, bool) else d.night_quiet,
     )
 
 
@@ -266,6 +269,37 @@ def outings_from_sessions(sessions: list[Session], gaps: list[Gap], min_outing_s
             continue
         outings.append(Outing(first.end, second.start))
     return outings
+
+
+NIGHT_QUIET_FROM, NIGHT_QUIET_UNTIL, MORNING_END = 0, 4, 12      # a gap starting 00:00-03:59 and ending before 12:00 (same calendar day)
+
+
+def _is_night_quiet(start: float, end: float, tz: tzinfo | None) -> bool:
+    a, b = _local(start, tz), _local(end, tz)
+    return NIGHT_QUIET_FROM <= a.hour < NIGHT_QUIET_UNTIL and b.date() == a.date() and b.hour < MORNING_END and end > start
+
+
+def merge_night_quiet(sessions: list[Session], gaps: list[Gap], tz: tzinfo | None) -> tuple[list[Session], list[float]]:
+    """Treat the phone going quiet overnight as time at home.
+
+    Phones drop off the WiFi while their owner sleeps. An "absence" that starts between midnight and 04:00 and
+    is over before noon is far more likely that than a night out, and counting it made Mathilde "leave" at 02:33 (really:
+    she had just got home and the phone went to sleep). Such a gap between two sessions is bridged, so it is neither an
+    outing nor a break in the day at home. Gaps that touch scanner downtime, or end in an arrival the scanner only learned
+    of after a restart, are left alone. Returns the sessions and the clock hour at which each bridged gap ended.
+    """
+    merged: list[Session] = []
+    wakes: list[float] = []
+    for session in sessions:
+        last = merged[-1] if merged else None
+        if (last is not None and last.end is not None and session.start_ok and not _overlaps(gaps, last.end, session.start)
+                and _is_night_quiet(last.end, session.start, tz)):
+            merged[-1] = Session(last.start, session.end, last.start_ok, last.spans_gap or session.spans_gap)
+            local = _local(session.start, tz)
+            wakes.append(local.hour + local.minute / 60)
+            continue
+        merged.append(session)
+    return merged, wakes
 
 
 # ---------------------------------------------------------------------------
@@ -550,7 +584,9 @@ def choose_method(outings: list[Outing], tz: tzinfo | None, settings: Settings) 
     """Pick whichever method had the smaller typical error in the backtest (time-of-day on a tie)."""
     tod = backtest(outings, tz, settings, "time_of_day")
     dur = backtest(outings, tz, settings, "duration")
-    if (dur["tests"] >= 10 and tod["tests"] >= 10 and dur["median_error_min"] is not None
+    # the duration method only predicts outings that began at a similar time, so it is tested on fewer outings: it must cover at least half as
+    # many as time-of-day before its error can be compared fairly (16 tests against 68 is not a fair win)
+    if (dur["tests"] >= 10 and tod["tests"] >= 10 and dur["tests"] * 2 >= tod["tests"] and dur["median_error_min"] is not None
             and tod["median_error_min"] is not None and dur["median_error_min"] < tod["median_error_min"]):
         return "duration", dur
     return "time_of_day", tod
@@ -724,6 +760,7 @@ class PersonData:
     method: str = "time_of_day"
     boost: float = 1.0
     weighting: dict[str, Any] = field(default_factory=dict)
+    quiet_wakes: list[float] = field(default_factory=list)    # clock hours at which overnight phone-quiet gaps ended
     backtest: dict[str, Any] = field(default_factory=dict)
     typical: dict[str, Any] = field(default_factory=dict)
     quality: dict[str, Any] = field(default_factory=dict)
@@ -811,11 +848,11 @@ def analyse(conn: sqlite3.Connection, config: dict[str, Any], now: float | None 
             f"SELECT COUNT(*), COALESCE(MAX(id), 0) FROM events WHERE mac_address IN ({marks})", macs).fetchone()[:2]
         cutoff = ignore_before(config, person, tz)
         key = (db, person, tuple(macs), count, newest, tuple(all_gaps), settings.flap_minutes,
-               settings.flap_minutes_bluetooth, settings.min_outing_minutes, int(now // 3600), cutoff)
+               settings.flap_minutes_bluetooth, settings.min_outing_minutes, int(now // 3600), cutoff, settings.night_quiet, tz)
         with _cache_lock:
             cached = _session_cache.get(key)
         if cached:
-            signal, raw, sessions, outings = cached
+            signal, raw, sessions, outings, wakes = cached
         else:
             events = [(r[0], r[1], r[2]) for r in conn.execute(
                 f"SELECT mac_address, event_type, timestamp FROM events WHERE mac_address IN ({marks}) AND timestamp >= ?",
@@ -824,8 +861,11 @@ def analyse(conn: sqlite3.Connection, config: dict[str, Any], now: float | None 
             flap = (settings.flap_minutes_bluetooth if "Bluetooth" in signal else settings.flap_minutes) * 60
             sessions = build_sessions(events, all_gaps, flap, now)
             raw = len(build_sessions(events, all_gaps, 0.0, now))
+            wakes = []
+            if settings.night_quiet:
+                sessions, wakes = merge_night_quiet(sessions, all_gaps, tz)
             outings = outings_from_sessions(sessions, all_gaps, settings.min_outing_minutes * 60)
-            _remember(_session_cache, key, (signal, raw, sessions, outings))
+            _remember(_session_cache, key, (signal, raw, sessions, outings, wakes))
 
         bkey = (tuple(outings), settings, tz)
         with _cache_lock:
@@ -837,9 +877,14 @@ def analyse(conn: sqlite3.Connection, config: dict[str, Any], now: float | None 
         typical = typical_times(outings, tz, settings.min_samples)
         first = min((s.start for s in sessions), default=None)
         days = observed_days(all_gaps, tz, first, now) if first else 0
+        qual = quality(raw, sessions, outings, days, signal, settings.min_samples, typical)
+        if wakes:
+            qual["night_quiet"] = len(wakes)
+            qual["reasons"].append(f"{len(wakes)} overnight gap(s) between midnight and 04:00 (the phone going quiet while its owner sleeps) "
+                                   "were treated as time at home, not as outings")
         result[person] = PersonData(person, person.title(), macs, signal, raw, sessions, outings,
-                                    states.get(person, {}).get("state", "away"), method, boost, weighting, bt, typical,
-                                    quality(raw, sessions, outings, days, signal, settings.min_samples, typical))
+                                    states.get(person, {}).get("state", "away"), method, boost, weighting,
+                                    backtest=bt, typical=typical, quality=qual, quiet_wakes=wakes)
     return result
 
 
@@ -860,6 +905,12 @@ def person_prediction(data: PersonData, gaps: list[Gap], now: float, tz: tzinfo 
     leave_ts = last.end
     if last.spans_gap or _overlaps(gaps, leave_ts, now):
         return {"kind": "return", "status": "unknown", "reason": "downtime", "leave_ts": leave_ts}
+    local = _local(leave_ts, tz)
+    if (settings.night_quiet and NIGHT_QUIET_FROM <= local.hour < NIGHT_QUIET_UNTIL and now - leave_ts < MORNING_END * 3600
+            and len(data.quiet_wakes) >= 3 and _local(now, tz).date() == local.date() and _local(now, tz).hour < MORNING_END):
+        # the phone went quiet in the small hours: that has usually been the phone asleep at home, and it reappears in the morning
+        return {"kind": "return", "status": "phone_quiet", "leave_ts": leave_ts, "usual_wake": statistics.median(data.quiet_wakes),
+                "n": len(data.quiet_wakes)}
     out = predict_return(data.outings, leave_ts, now, tz, settings, data.method, data.boost)
     out["kind"], out["leave_ts"] = "return", leave_ts
     return out
@@ -936,6 +987,9 @@ def describe_prediction(display: str, pred: dict[str, Any], typical: dict[str, A
         return text + _weekday_basis(pred) + "."
     if status == "overdue":
         return f"{display} is later than usual: normally back by {clock(pred['usual_high'])} (80% of similar days) and not home yet."
+    if status == "phone_quiet":
+        return (f"{display}'s phone went quiet at {clock(pred['leave_ts'])}. At that time of night it has usually been the phone asleep at home, "
+                f"not {display} going out: it normally shows up again around {fmt_hours(pred['usual_wake'])} (from {pred['n']} nights).")
     if status == "long_away":
         return f"{display} has been away for a long time, so there is no usual return time to predict."
     if status == "unknown":

@@ -307,6 +307,7 @@ function etaText(p) {
     if (pr.status === 'ready') {
         return ' \u00b7 expected ~' + new Date(pr.median * 1000).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit', hourCycle: 'h23'});
     }
+    if (pr.status === 'phone_quiet') return ' \u00b7 phone quiet, probably asleep at home';
     return pr.status === 'overdue' ? ' \u00b7 later than usual' : '';
 }
 

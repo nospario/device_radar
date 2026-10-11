@@ -276,6 +276,11 @@ class DashboardChipTests(unittest.TestCase):
                           "prediction": {"kind": "return", "status": "ready", "median": 1790000000}})
         self.assertRegex(text, r"expected ~\d\d:\d\d")
 
+    def test_a_phone_gone_quiet_overnight_is_not_shown_as_a_departure_with_an_eta(self) -> None:
+        text = self.chip({"state": "away", "since": None, "last_seen": None, "prediction": {"kind": "return", "status": "phone_quiet", "usual_wake": 10.4}})
+        self.assertIn("phone quiet, probably asleep at home", text)
+        self.assertNotIn("expected", text)
+
     def test_overdue_says_later_than_usual(self) -> None:
         self.assertIn("later than usual", self.chip({"state": "away", "prediction": {"kind": "return", "status": "overdue"}}))
 
