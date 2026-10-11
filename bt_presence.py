@@ -28,6 +28,7 @@ return belongs to the evening before.
 from __future__ import annotations
 
 import asyncio
+import calendar
 import html
 import logging
 import random
@@ -49,6 +50,15 @@ DAY_START_HOUR = 4
 SETTLE_SECONDS = 15 * 60       # an arrival/departure this soon after the scanner restarted is not a real one
 WEEKDAY, WEEKEND = "weekday", "weekend"
 
+# Day-of-week weighting: outings on the same weekday as the one in progress can count extra (``boost`` times their normal weight).
+# It is tried against each person's own past outings and only adopted when it clearly helps (see ``choose_model``).
+BOOST_CANDIDATES = (2.0, 4.0, 8.0, 16.0)
+BOOST_MIN_TESTS = 15            # backtest predictions needed before the weighting can be adopted
+BOOST_MIN_GAIN_MINUTES = 5.0    # ... and the typical error must drop by at least this much
+BOOST_MIN_GAIN_FRACTION = 0.10  # ... and by at least this fraction
+BOOST_MAX_HIT_DROP = 0.05       # ... without the 80% window getting worse by more than this
+BOOST_MIN_GOOD = 2              # ... and at least this many of the tried weightings must do so (one lucky result could be noise)
+
 
 # ---------------------------------------------------------------------------
 # Settings
@@ -67,6 +77,7 @@ class Settings:
     late_dry_run: bool = False
     late_people: tuple[str, ...] = ()
     late_margin_minutes: float = 30.0
+    weekday_boost: float | None = None      # None = decide by testing; a number forces it (1 = off)
 
 
 def _num(value: Any, default: float, low: float, high: float) -> float:
@@ -81,6 +92,8 @@ def load_settings(config: dict[str, Any]) -> Settings:
         people = []
     enabled, dry = config.get("late_alerts_enabled"), config.get("late_alerts_dry_run")
     samples = config.get("presence_min_samples")
+    boost = config.get("presence_weekday_boost")
+    forced = float(boost) if isinstance(boost, (int, float)) and not isinstance(boost, bool) and 1 <= boost <= 20 else None
     return Settings(
         flap_minutes=_num(config.get("presence_flap_minutes"), d.flap_minutes, 1, 240),
         flap_minutes_bluetooth=_num(config.get("presence_flap_minutes_bluetooth"), d.flap_minutes_bluetooth, 1, 240),
@@ -93,6 +106,7 @@ def load_settings(config: dict[str, Any]) -> Settings:
         late_dry_run=dry if isinstance(dry, bool) else d.late_dry_run,
         late_people=tuple(bt_people.normalise_person(p) or "" for p in people if bt_people.normalise_person(p)),
         late_margin_minutes=_num(config.get("late_alerts_margin_minutes"), d.late_margin_minutes, 0, 600),
+        weekday_boost=forced,
     )
 
 
@@ -449,12 +463,15 @@ def _history(outings: list[Outing], before: float, now: float, kind: str, tz: tz
 
 
 def predict_return(outings: list[Outing], leave_ts: float, now: float, tz: tzinfo | None,
-                   settings: Settings, method: str = "time_of_day") -> dict[str, Any]:
+                   settings: Settings, method: str = "time_of_day", boost: float = 1.0) -> dict[str, Any]:
     """When will someone who left at ``leave_ts`` be back? See the module docstring.
 
     ``status`` is ``ready`` (with median/low/high timestamps), ``overdue`` (later than any similar
     past outing; ``usual_high`` says when they are normally back by), ``insufficient`` (too little
     similar history) or ``long_away`` (gone more than ``long_away_hours``).
+
+    ``boost`` counts past outings on the same day of the week as this one that many times over (1 = every
+    weekday or weekend day equal). The "usual" times behind ``overdue`` never use it, so late alerts do not change.
     """
     if now - leave_ts > settings.long_away_hours * 3600:
         return {"status": "long_away"}
@@ -464,32 +481,38 @@ def predict_return(outings: list[Outing], leave_ts: float, now: float, tz: tzinf
     if len(history) < settings.min_samples:
         return {"status": "insufficient", "n": len(history), "needed": settings.min_samples}
 
-    pairs: list[tuple[float, float]] = []
+    weekday = leave_day.weekday()
+    n_same_day = sum(1 for o in history if shifted(o.leave, tz)[0].weekday() == weekday)
+    pairs: list[tuple[float, float]] = []          # weighted as asked (same weekday counted ``boost`` times)
+    plain: list[tuple[float, float]] = []          # the ordinary recency weights only
     for o in history:
-        weight = 0.5 ** ((now - o.back) / 86400 / settings.halflife_days)
+        base = 0.5 ** ((now - o.back) / 86400 / settings.halflife_days)
+        weight = base * (boost if shifted(o.leave, tz)[0].weekday() == weekday else 1.0)
         if method == "duration":
             if abs(shifted(o.leave, tz)[1] - leave_h) > 1.5:
                 continue
-            pairs.append((leave_ts + o.duration, weight))
+            value = leave_ts + o.duration
         else:
             back_day, back_h = shifted(o.back, tz)
             hours = back_h + (24 if back_day > shifted(o.leave, tz)[0] else 0)
-            pairs.append((hours_to_ts(leave_day, hours, tz), weight))
+            value = hours_to_ts(leave_day, hours, tz)
+        pairs.append((value, weight))
+        plain.append((value, base))
     if len(pairs) < settings.min_samples:
         return {"status": "insufficient", "n": len(pairs), "needed": settings.min_samples, "method": method}
 
-    all_high = weighted_quantile(pairs, 0.9)
+    info = {"boost": boost, "weekday": weekday, "n_same_day": n_same_day}
     remaining = [(t, w) for t, w in pairs if t >= now]
     if len(remaining) < 3:
-        return {"status": "overdue", "n": len(pairs), "method": method,
-                "usual_median": weighted_quantile(pairs, 0.5), "usual_high": all_high}
-    return {"status": "ready", "n": len(pairs), "method": method,
+        return {"status": "overdue", "n": len(pairs), "method": method, **info,
+                "usual_median": weighted_quantile(plain, 0.5), "usual_high": weighted_quantile(plain, 0.9)}
+    return {"status": "ready", "n": len(pairs), "method": method, **info,
             "median": weighted_quantile(remaining, 0.5), "low": weighted_quantile(remaining, 0.1),
             "high": weighted_quantile(remaining, 0.9)}
 
 
 def backtest(outings: list[Outing], tz: tzinfo | None, settings: Settings, method: str,
-             min_history: int | None = None) -> dict[str, Any]:
+             min_history: int | None = None, boost: float = 1.0) -> dict[str, Any]:
     """Walk forward through past outings: predict each from only the outings before it.
 
     Returns how often the 80% window contained the real return time, the typical error of the
@@ -503,7 +526,7 @@ def backtest(outings: list[Outing], tz: tzinfo | None, settings: Settings, metho
     for k in range(min_history, len(ordered)):
         target = ordered[k]
         simulated_now = target.leave + 600
-        pred = predict_return(ordered[:k], target.leave, simulated_now, tz, settings, method)
+        pred = predict_return(ordered[:k], target.leave, simulated_now, tz, settings, method, boost)
         if pred["status"] != "ready":
             skipped += 1
             continue
@@ -516,9 +539,10 @@ def backtest(outings: list[Outing], tz: tzinfo | None, settings: Settings, metho
         if same:
             guess = hours_to_ts(day, statistics.median(same), tz)
             naive_errors.append(abs(guess - target.back) / 60)
-    return {"method": method, "tests": tests, "skipped": skipped,
+    return {"method": method, "boost": boost, "tests": tests, "skipped": skipped,
             "hit_rate": round(hits / tests, 2) if tests else None,
             "median_error_min": round(statistics.median(errors)) if errors else None,
+            "mean_error_min": round(statistics.fmean(errors)) if errors else None,
             "naive_error_min": round(statistics.median(naive_errors)) if naive_errors else None}
 
 
@@ -530,6 +554,65 @@ def choose_method(outings: list[Outing], tz: tzinfo | None, settings: Settings) 
             and tod["median_error_min"] is not None and dur["median_error_min"] < tod["median_error_min"]):
         return "duration", dur
     return "time_of_day", tod
+
+
+def _brief(bt: dict[str, Any]) -> dict[str, Any]:
+    return {k: bt.get(k) for k in ("method", "boost", "tests", "hit_rate", "median_error_min", "mean_error_min")}
+
+
+def choose_model(outings: list[Outing], tz: tzinfo | None, settings: Settings) -> tuple[str, float, dict[str, Any], dict[str, Any]]:
+    """``(method, boost, backtest, weighting)`` for one person.
+
+    The method is chosen as before. The day-of-week weighting (``boost`` > 1) is adopted only if, tested on the
+    person's own past outings with that method, it clearly beats not using it: at least ``BOOST_MIN_TESTS`` predictions,
+    the average error down by ``BOOST_MIN_GAIN_MINUTES`` and ``BOOST_MIN_GAIN_FRACTION``, the 80% window not worse by more
+    than ``BOOST_MAX_HIT_DROP``, and at least ``BOOST_MIN_GOOD`` of the tried weightings agreeing. ``presence_weekday_boost`` can force a value (1 turns it off). ``weighting`` explains
+    the decision for the Reports page.
+    """
+    method, base = choose_method(outings, tz, settings)
+    forced = settings.weekday_boost
+    if forced is not None:
+        if forced == 1.0:
+            return method, 1.0, base, {"mode": "off", "adopted": False, "boost": 1.0, "baseline": _brief(base), "tried": []}
+        bt = backtest(outings, tz, settings, method, boost=forced)
+        return method, forced, bt, {"mode": "forced", "adopted": True, "boost": forced, "baseline": _brief(base), "tried": [_brief(bt)]}
+    tried = [backtest(outings, tz, settings, method, boost=b) for b in BOOST_CANDIDATES]          # the chosen method, so the tests are comparable
+    weighting = {"mode": "auto", "adopted": False, "boost": 1.0, "baseline": _brief(base), "tried": [_brief(t) for t in tried],
+                 "needed_tests": BOOST_MIN_TESTS}
+    # judged on the MEAN error: when only one weekday differs, most outings are predicted equally well either way and the median would not move
+    usable = [t for t in tried if t["tests"] >= BOOST_MIN_TESTS and t["mean_error_min"] is not None]
+    if base["tests"] < BOOST_MIN_TESTS or base["mean_error_min"] is None or not usable:
+        return method, 1.0, base, weighting
+    need = max(BOOST_MIN_GAIN_MINUTES, BOOST_MIN_GAIN_FRACTION * base["mean_error_min"])
+    good = [t for t in usable if base["mean_error_min"] - t["mean_error_min"] >= need
+            and (t["hit_rate"] or 0) >= (base["hit_rate"] or 0) - BOOST_MAX_HIT_DROP]
+    best = min(usable, key=lambda t: (t["mean_error_min"], t["boost"]))
+    if len(good) >= BOOST_MIN_GOOD:                          # one lucky weighting could be noise; two or more agreeing is not
+        pick = min(good, key=lambda t: (t["mean_error_min"], t["boost"]))
+        weighting.update({"adopted": True, "boost": pick["boost"], "chosen": _brief(pick), "agreeing": len(good)})
+        return method, pick["boost"], pick, weighting
+    weighting.update({"best_alternative": _brief(best), "agreeing": len(good)})
+    return method, 1.0, base, weighting
+
+
+def weekday_table(outings: list[Outing], tz: tzinfo | None, now: float, settings: Settings) -> list[dict[str, Any]]:
+    """Monday to Sunday: how many outings there are and the typical leave and return time for each (history window only)."""
+    cutoff = now - settings.history_days * 86400
+    rows = []
+    for w in range(7):
+        leaves, returns = [], []
+        for o in outings:
+            if o.back < cutoff:
+                continue
+            day, leave_h = shifted(o.leave, tz)
+            if day.weekday() != w:
+                continue
+            back_day, back_h = shifted(o.back, tz)
+            leaves.append(leave_h)
+            returns.append(back_h + (24 if back_day > day else 0))
+        rows.append({"weekday": w, "name": calendar.day_name[w], "n": len(returns),
+                     "leave": summarise(leaves, 3), "return": summarise(returns, 3)})
+    return rows
 
 
 def predict_leave(outings: list[Outing], home_since: float | None, now: float, tz: tzinfo | None,
@@ -639,6 +722,8 @@ class PersonData:
     outings: list[Outing]
     state: str                                  # home / away (from bt_people)
     method: str = "time_of_day"
+    boost: float = 1.0
+    weighting: dict[str, Any] = field(default_factory=dict)
     backtest: dict[str, Any] = field(default_factory=dict)
     typical: dict[str, Any] = field(default_factory=dict)
     quality: dict[str, Any] = field(default_factory=dict)
@@ -682,7 +767,7 @@ def _signal(devices: list[dict[str, Any]]) -> str:
 
 
 _session_cache: dict[tuple, Any] = {}
-_backtest_cache: dict[tuple, tuple[str, dict[str, Any]]] = {}
+_backtest_cache: dict[tuple, tuple] = {}
 _cache_lock = threading.Lock()
 _CACHE_LIMIT = 64
 
@@ -746,14 +831,14 @@ def analyse(conn: sqlite3.Connection, config: dict[str, Any], now: float | None 
         with _cache_lock:
             chosen = _backtest_cache.get(bkey)
         if chosen is None:
-            chosen = choose_method(outings, tz, settings)
+            chosen = choose_model(outings, tz, settings)
             _remember(_backtest_cache, bkey, chosen)
-        method, bt = chosen
+        method, boost, bt, weighting = chosen
         typical = typical_times(outings, tz, settings.min_samples)
         first = min((s.start for s in sessions), default=None)
         days = observed_days(all_gaps, tz, first, now) if first else 0
         result[person] = PersonData(person, person.title(), macs, signal, raw, sessions, outings,
-                                    states.get(person, {}).get("state", "away"), method, bt, typical,
+                                    states.get(person, {}).get("state", "away"), method, boost, weighting, bt, typical,
                                     quality(raw, sessions, outings, days, signal, settings.min_samples, typical))
     return result
 
@@ -775,7 +860,7 @@ def person_prediction(data: PersonData, gaps: list[Gap], now: float, tz: tzinfo 
     leave_ts = last.end
     if last.spans_gap or _overlaps(gaps, leave_ts, now):
         return {"kind": "return", "status": "unknown", "reason": "downtime", "leave_ts": leave_ts}
-    out = predict_return(data.outings, leave_ts, now, tz, settings, data.method)
+    out = predict_return(data.outings, leave_ts, now, tz, settings, data.method, data.boost)
     out["kind"], out["leave_ts"] = "return", leave_ts
     return out
 
@@ -802,6 +887,7 @@ def build_report(conn: sqlite3.Connection, config: dict[str, Any], now: float | 
             "prediction_text": describe_prediction(data.display, prediction, data.typical, now, tz),
             "typical_text": describe_typical(data.display, data.typical),
             "backtest": data.backtest, "method": data.method,
+            "boost": data.boost, "weighting": data.weighting, "weekdays": weekday_table(data.outings, tz, now, settings),
         })
     tracked = {p: d.sessions for p, d in people.items() if d.outings}
     untracked = sorted(p["display"] for p in status.values() if p["state"] == "no_phone")
@@ -845,8 +931,9 @@ def describe_prediction(display: str, pred: dict[str, Any], typical: dict[str, A
     if status == "ready":
         mins = max(0, round((pred["median"] - now) / 60))
         when = f"in about {mins} min" if mins < 90 else f"in about {round(mins / 60)} h"
-        return (f"{display} is expected home around {clock(pred['median'])} ({when}); 80% chance between "
-                f"{clock(pred['low'])} and {clock(pred['high'])}, from {pred['n']} similar {('weekday' if day_type(shifted(pred['leave_ts'], tz)[0]) == WEEKDAY else 'weekend')} outings.")
+        text = (f"{display} is expected home around {clock(pred['median'])} ({when}); 80% chance between "
+                f"{clock(pred['low'])} and {clock(pred['high'])}, from {pred['n']} similar {('weekday' if day_type(shifted(pred['leave_ts'], tz)[0]) == WEEKDAY else 'weekend')} outings")
+        return text + _weekday_basis(pred) + "."
     if status == "overdue":
         return f"{display} is later than usual: normally back by {clock(pred['usual_high'])} (80% of similar days) and not home yet."
     if status == "long_away":
@@ -854,6 +941,17 @@ def describe_prediction(display: str, pred: dict[str, Any], typical: dict[str, A
     if status == "unknown":
         return f"The scanner was off after {display} left, so I can't predict their return until it sees them arrive again."
     return f"Not enough history yet to predict when {display} will be home ({pred.get('n', 0)} of {pred.get('needed', '?')} similar outings)."
+
+
+def _weekday_basis(pred: dict[str, Any]) -> str:
+    """, counting the 4 past Tuesdays 3 times over" (or nothing, when the day of the week is not counted extra)."""
+    boost, n_same, weekday = pred.get("boost", 1.0), pred.get("n_same_day", 0), pred.get("weekday")
+    if weekday is None or n_same < 1:
+        return ""
+    name = calendar.day_name[weekday]
+    if boost > 1:
+        return f", counting the {n_same} past {name}{'s' if n_same != 1 else ''} {boost:g} times over"
+    return f" ({name}s are not counted extra yet)"
 
 
 def describe_typical(display: str, typical: dict[str, Any], which: str = "return") -> str | None:

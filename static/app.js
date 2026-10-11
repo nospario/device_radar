@@ -425,6 +425,36 @@ function accuracyHtml(p) {
     return text + '.';
 }
 
+// Monday to Sunday: how many outings there are for each day and the usual time (days with few outings are dimmed: not enough to trust yet)
+const WEEKDAY_FEW = 8;
+function weekdayTableHtml(rows) {
+    if (!rows || !rows.length) return '';
+    const cell = t => t && t.enough ? `<strong>${fmtHours(t.median)}</strong> <span class="text-dim">${fmtHours(t.q1)}\u2013${fmtHours(t.q3)}</span>` : '<span class="text-dim">\u2014</span>';
+    const body = rows.map(r => `<tr class="${r.n < WEEKDAY_FEW ? 'few-outings' : ''}"><th>${escapeHtml(r.name)}</th><td>${r.n}</td><td>${cell(r.leave)}</td><td>${cell(r.return)}</td></tr>`).join('');
+    return `<div class="table-wrap"><table class="report-table weekday-table"><thead><tr><th></th><th>Outings</th><th>Leaves</th><th>Gets home</th></tr></thead><tbody>${body}</tbody></table></div>` +
+        `<p class="text-dim chart-note">Last 6 months. Days with fewer than ${WEEKDAY_FEW} outings are faded: there is not enough data to be precise yet, and it gets better each week the scanner keeps running.</p>`;
+}
+
+// Is the day of the week counted extra in this person's arrival prediction, and did testing show it helps?
+function weightingHtml(p) {
+    const w = p.weighting;
+    if (!w || !w.mode) return '';
+    const mean = t => (t && t.mean_error_min !== null && t.mean_error_min !== undefined) ? `${t.mean_error_min} min` : '?';
+    if (w.mode === 'off') return 'Counting the day of the week extra is switched off in the settings.';
+    if (w.mode === 'forced') return `The same day of the week is counted <strong>${w.boost}\u00d7</strong> as a setting, not chosen by testing.`;
+    if (w.adopted) {
+        const c = w.chosen || {};
+        return `<strong>The same day of the week counts ${w.boost}\u00d7 extra.</strong> Tested on ${c.tests} past outings it cut the average error from ${mean(w.baseline)} to ${mean(c)} (${w.agreeing} of the weightings tried agreed).`;
+    }
+    const base = w.baseline || {};
+    if (!base.tests || base.tests < (w.needed_tests || 15)) {
+        return `Not enough past outings yet to test whether the day of the week helps (${base.tests || 0} of ${w.needed_tests || 15} test predictions needed). It switches on by itself once there is enough data and it helps.`;
+    }
+    const alt = w.best_alternative;
+    return `Counting the day of the week extra has not been shown to help yet` +
+        (alt ? ` (best tried: ${alt.boost}\u00d7 would give ${mean(alt)} against ${mean(base)} now, from ${base.tests} test predictions)` : '') + `. It is tested again as more data arrives.`;
+}
+
 function personReportHtml(p, chartW) {
     const q = p.quality || {};
     const reasons = (q.reasons || []).map(r => `<li>${escapeHtml(r)}</li>`).join('');
@@ -446,6 +476,9 @@ function personReportHtml(p, chartW) {
         <h4>Typical times</h4>
         <div class="table-wrap"><table class="report-table"><thead><tr><th></th><th>Leaves</th><th>Gets home</th><th>Time out</th></tr></thead>
         <tbody>${row('Weekdays', typical.weekday || {})}${row('Weekends', typical.weekend || {})}</tbody></table></div>
+        <h4>By day of the week</h4>
+        ${weekdayTableHtml(p.weekdays)}
+        <p class="report-line weighting-line">${weightingHtml(p)}</p>
         <h4>Last 14 days at home</h4>
         ${timelineSvg(p.timeline || [], chartW)}
         <p class="text-dim chart-note"><span class="swatch swatch-home"></span> at home <span class="swatch swatch-unknown"></span> scanner was off (unknown)</p>

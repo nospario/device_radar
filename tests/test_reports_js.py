@@ -290,5 +290,85 @@ class DashboardChipTests(unittest.TestCase):
         self.assertEqual(text, "home")
 
 
+WEEKDAYS = [{"weekday": i, "name": name, "n": n, "leave": SUMMARY if n >= 3 else NOT_ENOUGH, "return": SUMMARY if n >= 3 else NOT_ENOUGH}
+            for i, (name, n) in enumerate([("Monday", 14), ("Tuesday", 12), ("Wednesday", 9), ("Thursday", 5), ("Friday", 11), ("Saturday", 2), ("Sunday", 0)])]
+BASE = {"method": "time_of_day", "boost": 1.0, "tests": 74, "hit_rate": 0.69, "median_error_min": 197, "mean_error_min": 262}
+
+
+@unittest.skipUnless(shutil.which("node"), "node is not installed")
+class WeekdayReportTests(unittest.TestCase):
+    def test_the_table_lists_monday_to_sunday_with_counts(self) -> None:
+        html = js("weekdayTableHtml(data)", WEEKDAYS)["result"]
+        for name in ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"):
+            self.assertIn(f"<th>{name}</th>", html)
+        self.assertLess(html.index("Monday"), html.index("Sunday"))
+        self.assertIn("<th>Monday</th><td>14</td>", html)
+        self.assertIn("<th>Sunday</th><td>0</td>", html)
+        self.assertIn("Gets home", html)
+
+    def test_days_with_few_outings_are_faded_and_explained(self) -> None:
+        html = js("weekdayTableHtml(data)", WEEKDAYS)["result"]
+        self.assertEqual(html.count('class="few-outings"'), 3)                                      # Thursday (5), Saturday (2), Sunday (0)
+        self.assertRegex(html, r'<tr class="few-outings"><th>Thursday</th>')
+        self.assertRegex(html, r'<tr class=""><th>Monday</th>')
+        self.assertIn("fewer than 8 outings", html)
+        self.assertIn("not enough data to be precise yet", html)
+
+    def test_times_and_the_empty_cells(self) -> None:
+        html = js("weekdayTableHtml(data)", WEEKDAYS)["result"]
+        self.assertIn("<strong>17:30</strong>", html)
+        self.assertRegex(html, r"<th>Sunday</th><td>0</td><td><span class=\"text-dim\">\u2014</span></td>")
+
+    def test_no_table_without_rows(self) -> None:
+        self.assertEqual(js("weekdayTableHtml(data)", [])["result"], "")
+        self.assertEqual(js("weekdayTableHtml(data)", None)["result"], "")
+
+    def test_the_weighting_in_use_is_explained_with_the_test_result(self) -> None:
+        w = {"mode": "auto", "adopted": True, "boost": 4, "baseline": {**BASE, "mean_error_min": 65}, "chosen": {**BASE, "boost": 4.0, "tests": 37, "mean_error_min": 46}, "agreeing": 4, "needed_tests": 15}
+        text = js("weightingHtml(data)", {"weighting": w})["result"]
+        self.assertIn("The same day of the week counts 4\u00d7 extra.", text)
+        self.assertIn("cut the average error from 65 min to 46 min", text)
+        self.assertIn("37 past outings", text)
+        self.assertIn("4 of the weightings tried agreed", text)
+
+    def test_not_enough_data_to_test_yet(self) -> None:
+        w = {"mode": "auto", "adopted": False, "boost": 1.0, "baseline": {**BASE, "tests": 6}, "tried": [], "needed_tests": 15}
+        text = js("weightingHtml(data)", {"weighting": w})["result"]
+        self.assertIn("Not enough past outings yet", text)
+        self.assertIn("6 of 15 test predictions needed", text)
+        self.assertIn("switches on by itself", text)
+        none = js("weightingHtml(data)", {"weighting": {"mode": "auto", "adopted": False, "baseline": {"tests": 0}, "needed_tests": 15}})["result"]
+        self.assertIn("0 of 15", none)
+
+    def test_tested_but_not_shown_to_help(self) -> None:
+        w = {"mode": "auto", "adopted": False, "boost": 1.0, "baseline": BASE, "best_alternative": {**BASE, "boost": 16.0, "mean_error_min": 237}, "needed_tests": 15}
+        text = js("weightingHtml(data)", {"weighting": w})["result"]
+        self.assertIn("has not been shown to help yet", text)
+        self.assertIn("16\u00d7 would give 237 min against 262 min now, from 74 test predictions", text)
+
+    def test_forced_and_off(self) -> None:
+        self.assertIn("<strong>3\u00d7</strong> as a setting", js("weightingHtml(data)", {"weighting": {"mode": "forced", "boost": 3}})["result"])
+        self.assertIn("switched off in the settings", js("weightingHtml(data)", {"weighting": {"mode": "off", "boost": 1}})["result"])
+
+    def test_old_reports_without_the_new_fields_still_render(self) -> None:
+        self.assertEqual(js("weightingHtml(data)", {})["result"], "")
+        html = js("personReportHtml(data, 600)", person())["result"]
+        self.assertIn("How reliable are the predictions?", html)
+        self.assertIn("By day of the week", html)                                                  # heading is there, the table just empty
+
+    def test_the_person_card_shows_both(self) -> None:
+        w = {"mode": "auto", "adopted": False, "boost": 1.0, "baseline": {**BASE, "tests": 6}, "needed_tests": 15}
+        html = js("personReportHtml(data, 600)", person(weekdays=WEEKDAYS, weighting=w))["result"]
+        self.assertIn('class="report-table weekday-table"', html)
+        self.assertIn('class="report-line weighting-line"', html)
+        self.assertLess(html.index("By day of the week"), html.index("Last 14 days at home"))
+
+    def test_nothing_from_the_server_can_inject_html(self) -> None:
+        evil = '<img src=x onerror=alert(1)>'
+        rows = [{**WEEKDAYS[0], "name": evil}]
+        html = js("weekdayTableHtml(data)", rows)["result"]
+        self.assertNotIn("<img", html)
+
+
 if __name__ == "__main__":
     unittest.main()

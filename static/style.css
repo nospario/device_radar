@@ -660,3 +660,6 @@ tbody tr:hover { background: var(--bg-hover); }
 .quality-details summary { cursor: pointer; color: var(--text-dim); }
 .quality-reasons, .household-list { margin: 0.4rem 0 0.2rem 1.2rem; }
 
+
+.weekday-table tr.few-outings { opacity: 0.55; }
+.weighting-line { margin-top: 0.5rem; }

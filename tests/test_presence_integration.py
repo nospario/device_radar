@@ -71,6 +71,34 @@ class Household(unittest.TestCase):
             self.add_event("arrived", o.back, mac)
 
 
+class WeekdayPredictionTests(Household):
+    """The prediction knows which day of the week it is, and says how it was made."""
+
+    def test_the_live_prediction_carries_the_weekday_basis(self) -> None:
+        pred = bp.eta_for_people(self.conn, {}, NOW)["sam"]
+        self.assertEqual((pred["status"], pred["weekday"]), ("ready", 2))                                    # Wednesday
+        self.assertGreater(pred["n_same_day"], 5)
+        self.assertEqual(pred["boost"], 1.0)
+
+    def test_the_answer_says_the_day_is_not_counted_extra_yet(self) -> None:
+        answer = asyncio.run(tg.answer_presence("when will Sam be home?", {}, self.db, NOW))
+        self.assertIn("Wednesdays are not counted extra yet", answer)
+
+    def test_a_forced_weighting_is_used_and_explained(self) -> None:
+        cfg = {"presence_weekday_boost": 4}
+        bp._backtest_cache.clear()
+        pred = bp.eta_for_people(self.conn, cfg, NOW)["sam"]
+        self.assertEqual(pred["boost"], 4.0)
+        answer = asyncio.run(tg.answer_presence("when will Sam be home?", cfg, self.db, NOW))
+        self.assertRegex(answer, r"counting the \d+ past Wednesdays 4 times over")
+
+    def test_turning_it_off_in_the_config(self) -> None:
+        bp._backtest_cache.clear()
+        report = bp.build_report(self.conn, {"presence_weekday_boost": 1}, NOW)
+        self.assertEqual(report["persons"][0]["weighting"]["mode"], "off")
+        self.assertEqual(report["persons"][0]["boost"], 1.0)
+
+
 class VisitorTests(Household):
     VISITOR = "AA:00:00:00:00:0F"
 
@@ -327,8 +355,14 @@ class WebEndpointTests(Household):
             report = self.client.get("/api/reports").get_json()
         (sam,) = report["persons"]
         for key in ("person", "display", "state", "quality", "typical", "daily", "timeline", "trend", "prediction",
-                    "prediction_text", "typical_text", "backtest", "method"):
+                    "prediction_text", "typical_text", "backtest", "method", "boost", "weighting", "weekdays"):
             self.assertIn(key, sam)
+        self.assertEqual([r["name"] for r in sam["weekdays"]], ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"])
+        self.assertEqual(sam["weekdays"][5]["n"], 0)                                                         # Sam has a weekday routine only
+        self.assertGreater(sam["weekdays"][0]["n"], 5)
+        self.assertEqual(sam["weighting"]["mode"], "auto")
+        self.assertFalse(sam["weighting"]["adopted"])                                                        # an identical routine every weekday: nothing to gain
+        self.assertEqual(sam["boost"], 1.0)
         self.assertEqual(len(sam["daily"]), 28)
         self.assertEqual(len(sam["timeline"]), 14)
         self.assertEqual(report["untracked"], ["Kim"])
