@@ -24,7 +24,6 @@ import bt_newdevice
 import bt_people
 import bt_presence
 import bt_search
-import bt_tasks
 
 logger = logging.getLogger("bt_telegram")
 
@@ -894,99 +893,6 @@ async def _maybe_handle_naming(update, context) -> bool:
     return True
 
 
-def _habits_daily_notes_dir() -> str:
-    return load_config().get(
-        "obsidian_daily_notes_dir", bt_tasks.DEFAULT_DAILY_NOTES_DIR,
-    )
-
-
-def _build_habit_keyboard(
-    habits: list[tuple[str, bool]],
-) -> "InlineKeyboardMarkup | None":
-    """Build a vertical toggle keyboard — one button per habit, with a ✓
-    prefix on completed ones. Tapping any button toggles state."""
-    if not habits:
-        return None
-    rows = []
-    for desc, done in habits:
-        label = f"✓ {desc}" if done else desc
-        rows.append([InlineKeyboardButton(
-            label, callback_data=f"habit:{bt_tasks.habit_hash(desc)}",
-        )])
-    return InlineKeyboardMarkup(rows)
-
-
-def _render_habit_message(habits: list[tuple[str, bool]]) -> str:
-    if not habits:
-        return "<b>No habits in today's Daily Note.</b>"
-    total = len(habits)
-    done_count = sum(1 for _, done in habits if done)
-    if done_count == total:
-        return (
-            f"<b>All {total} habits complete for today.</b>\n"
-            f"Tap any to un-tick."
-        )
-    return (
-        f"<b>Habits: {done_count}/{total} complete</b>\n"
-        f"Tap to toggle."
-    )
-
-
-async def _cmd_habits(update, context) -> None:
-    """Handle /habits — list all of today's #habit items with tap-to-toggle buttons."""
-    if not _is_authorized(update.effective_chat.id):
-        return
-    habits = bt_tasks.get_all_habits(_habits_daily_notes_dir())
-    await update.message.reply_text(
-        _render_habit_message(habits),
-        parse_mode="HTML",
-        reply_markup=_build_habit_keyboard(habits),
-    )
-
-
-async def _on_habit_callback(update, context) -> None:
-    """Handle a habit-button tap: toggle state in the Daily Note and
-    refresh the message in place."""
-    query = update.callback_query
-    if not _is_authorized(query.from_user.id if query.from_user else 0) and not _is_authorized(
-        query.message.chat.id if query.message else 0,
-    ):
-        await query.answer()
-        return
-
-    await query.answer()  # dismiss the loading spinner
-
-    data = query.data or ""
-    if not data.startswith("habit:"):
-        return
-    target_hash = data.split(":", 1)[1]
-
-    daily_notes_dir = _habits_daily_notes_dir()
-    current = bt_tasks.get_all_habits(daily_notes_dir)
-    matched = next(
-        ((desc, done) for desc, done in current
-         if bt_tasks.habit_hash(desc) == target_hash),
-        None,
-    )
-
-    if matched is not None:
-        desc, currently_done = matched
-        bt_tasks.set_habit_done_state(
-            daily_notes_dir, description=desc, done=not currently_done,
-        )
-
-    refreshed = bt_tasks.get_all_habits(daily_notes_dir)
-    try:
-        await query.edit_message_text(
-            _render_habit_message(refreshed),
-            parse_mode="HTML",
-            reply_markup=_build_habit_keyboard(refreshed),
-        )
-    except Exception as e:
-        # Most common: "message is not modified" when nothing changed
-        logger.debug("Habit message edit skipped: %s", e)
-
-
 async def _cmd_notify_toggle(update, context) -> None:
     """Handle /notify on|off <name> — toggle notifications for a device."""
     if not _is_authorized(update.effective_chat.id):
@@ -1414,10 +1320,8 @@ def main() -> None:
     app.add_handler(CommandHandler("say", _cmd_say))
     app.add_handler(CommandHandler("echoes", _cmd_echoes))
     app.add_handler(CommandHandler("readaloud", _cmd_readaloud))
-    app.add_handler(CommandHandler("habits", _cmd_habits))
     app.add_handler(CommandHandler("unnamed", _cmd_unnamed))
     app.add_handler(CommandHandler("eta", _cmd_eta))
-    app.add_handler(CallbackQueryHandler(_on_habit_callback, pattern=r"^habit:"))
     app.add_handler(CallbackQueryHandler(_on_newdevice_callback, pattern=r"^nd:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, _handle_message))
 
@@ -1452,7 +1356,6 @@ def main() -> None:
             BotCommand("say", "Speak a message on an Echo device"),
             BotCommand("echoes", "List available Echo devices"),
             BotCommand("readaloud", "Toggle Alexa read-aloud for chat"),
-            BotCommand("habits", "List outstanding habits (tap to complete)"),
             BotCommand("unnamed", "Name connected devices that have no name"),
             BotCommand("eta", "When people who are out will be home"),
         ])

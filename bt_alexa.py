@@ -10,7 +10,7 @@ import json
 import logging
 import re
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -21,7 +21,6 @@ import bt_db
 import bt_logging
 import bt_news
 import bt_tasks
-import bt_telegram
 import bt_weather
 
 logger = logging.getLogger("bt_alexa")
@@ -523,7 +522,7 @@ async def run_encourage_loop(config: dict[str, Any], db_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Task reminders (Obsidian Master Task List)
+# Task reminders (Obsidian Master Task List: tasks due today)
 # ---------------------------------------------------------------------------
 
 def _join_sentence(items: list[str]) -> str:
@@ -536,28 +535,12 @@ def _join_sentence(items: list[str]) -> str:
     return ", ".join(cleaned[:-1]) + f", and {cleaned[-1]}"
 
 
-def _bundle_tasks(
-    due_today: list[str], daily: list[str], max_per_bundle: int,
-) -> list[list[dict[str, str]]]:
-    """Split tasks into ordered bundles of up to ``max_per_bundle`` items.
-
-    Due-today tasks are listed first so today's time-critical items appear
-    in the earlier bundles; daily habits fill any remaining slots. A bundle
-    is a list of ``{"task", "group"}`` dicts so the LLM can frame each item
-    appropriately even when a bundle mixes both groups.
-    """
-    items: list[dict[str, str]] = []
-    items.extend({"task": t, "group": "due_today"} for t in due_today)
-    items.extend({"task": t, "group": "daily"} for t in daily)
-    bundles: list[list[dict[str, str]]] = []
-    for i in range(0, len(items), max_per_bundle):
-        bundles.append(items[i:i + max_per_bundle])
-    return bundles
+def _bundle_tasks(tasks: list[str], max_per_bundle: int) -> list[list[str]]:
+    """Split today's tasks into ordered bundles of up to ``max_per_bundle`` items."""
+    return [tasks[i:i + max_per_bundle] for i in range(0, len(tasks), max_per_bundle)]
 
 
-def _bundle_covered(
-    msg: str, bundle: list[dict[str, str]], min_ratio: float = 0.75,
-) -> bool:
+def _bundle_covered(msg: str, bundle: list[str], min_ratio: float = 0.75) -> bool:
     """Verify the generated message mentions each task in the bundle.
 
     Match on any word longer than 4 chars to be forgiving of minor wording
@@ -565,8 +548,8 @@ def _bundle_covered(
     """
     lower = msg.lower()
     covered = 0
-    for item in bundle:
-        words = [w.strip(".,;:!?") for w in item["task"].split() if len(w) > 4]
+    for task in bundle:
+        words = [w.strip(".,;:!?") for w in task.split() if len(w) > 4]
         if not words:
             covered += 1
             continue
@@ -575,20 +558,13 @@ def _bundle_covered(
     return covered >= max(1, int(len(bundle) * min_ratio))
 
 
-def _bundle_fallback(bundle: list[dict[str, str]]) -> str:
-    """Deterministic read of a bundle, distinguishing due-today and daily."""
-    due = [b["task"] for b in bundle if b["group"] == "due_today"]
-    daily = [b["task"] for b in bundle if b["group"] == "daily"]
-    parts: list[str] = []
-    if due:
-        parts.append("tasks due today: " + _join_sentence(due))
-    if daily:
-        parts.append("daily habits: " + _join_sentence(daily))
-    return "Richard, " + "; and ".join(parts) + "."
+def _bundle_fallback(bundle: list[str]) -> str:
+    """Deterministic read of a bundle."""
+    return "Richard, tasks due today: " + _join_sentence(bundle) + "."
 
 
 async def _generate_bundle_message(
-    bundle: list[dict[str, str]], part_num: int, total_parts: int,
+    bundle: list[str], part_num: int, total_parts: int,
     config: dict[str, Any],
 ) -> str:
     """Generate an Ollama-written reminder for a single bundle.
@@ -600,24 +576,16 @@ async def _generate_bundle_message(
     timeout = config.get("ollama_timeout_seconds", 30)
     model = config.get("alexa_ollama_model") or config.get("ollama_model", "qwen2.5:1.5b")
 
-    # Annotate each task with its group so the LLM can frame them naturally
-    # when a bundle contains a mix of due-today items and daily habits.
-    lines = []
-    for item in bundle:
-        tag = "due today" if item["group"] == "due_today" else "daily habit"
-        lines.append(f"- {item['task']} ({tag})")
-    task_list = "\n".join(lines)
+    task_list = "\n".join(f"- {task}" for task in bundle)
 
     series_hint = ""
     if total_parts > 1:
         series_hint = f" This is message {part_num} of {total_parts} in a series."
 
     prompt = (
-        f"Richard has these outstanding items:\n{task_list}\n\n"
+        f"Richard has these tasks due today:\n{task_list}\n\n"
         f"Write a short, warm, encouraging spoken reminder that names every "
-        f"task above. Use the bracketed labels to frame them naturally — "
-        f"'due today' items are today's commitments, 'daily habit' items are "
-        f"things Richard aims to do every day. At most two sentences of "
+        f"task above. These are today's commitments. At most two sentences of "
         f"friendly framing plus the task names. Target under 300 characters."
         f"{series_hint} No emoji, hashtags, bullet points, brackets, or "
         f"quotation marks. Output only the spoken message."
@@ -694,13 +662,9 @@ async def run_task_reminder_loop(config: dict[str, Any], db_path: Path) -> None:
             master_path = config.get(
                 "obsidian_master_task_path", bt_tasks.DEFAULT_MASTER_PATH,
             )
-            daily_notes_dir = config.get(
-                "obsidian_daily_notes_dir", bt_tasks.DEFAULT_DAILY_NOTES_DIR,
-            )
             due_today = bt_tasks.get_todays_outstanding_tasks(master_path)
-            daily = bt_tasks.get_daily_recurring_tasks(daily_notes_dir)
 
-            if not due_today and not daily:
+            if not due_today:
                 logger.debug("No outstanding tasks for today — skipping reminders")
                 conn = bt_db.get_connection(db_path)
                 for dev in due_devices:
@@ -712,7 +676,7 @@ async def run_task_reminder_loop(config: dict[str, Any], db_path: Path) -> None:
             bundle_minutes = float(config.get("tasks_bundle_minutes", 10))
             min_gap_sec = int(config.get("tasks_min_bundle_gap_seconds", 30))
 
-            bundles = _bundle_tasks(due_today, daily, max_per_bundle)
+            bundles = _bundle_tasks(due_today, max_per_bundle)
             gap_sec = 0.0
             if len(bundles) > 1:
                 gap_sec = max(
@@ -730,12 +694,7 @@ async def run_task_reminder_loop(config: dict[str, Any], db_path: Path) -> None:
                 # Re-check current outstanding tasks so anything ticked off
                 # mid-cycle (in Obsidian) doesn't still get announced.
                 current_due = set(bt_tasks.get_todays_outstanding_tasks(master_path))
-                current_daily = set(bt_tasks.get_daily_recurring_tasks(daily_notes_dir))
-                live_bundle = [
-                    b for b in bundle
-                    if (b["group"] == "due_today" and b["task"] in current_due)
-                    or (b["group"] == "daily" and b["task"] in current_daily)
-                ]
+                live_bundle = [t for t in bundle if t in current_due]
                 if not live_bundle:
                     logger.info(
                         "Bundle %d/%d skipped — all tasks completed since cycle started",
@@ -745,7 +704,7 @@ async def run_task_reminder_loop(config: dict[str, Any], db_path: Path) -> None:
                         await asyncio.sleep(gap_sec)
                     continue
                 if len(live_bundle) != len(bundle):
-                    dropped = [b["task"] for b in bundle if b not in live_bundle]
+                    dropped = [t for t in bundle if t not in live_bundle]
                     logger.info(
                         "Bundle %d/%d: dropped %d completed task(s): %s",
                         i + 1, len(bundles), len(dropped), dropped,
@@ -778,239 +737,6 @@ async def run_task_reminder_loop(config: dict[str, Any], db_path: Path) -> None:
 
         except Exception:
             logger.error("Error in task reminder loop", exc_info=True)
-
-
-# ---------------------------------------------------------------------------
-# Hourly Telegram habit reminders
-# ---------------------------------------------------------------------------
-
-async def run_telegram_habit_reminder_loop(config: dict[str, Any]) -> None:
-    """Send a Telegram message on the hour listing outstanding daily habits.
-
-    Runs from ``telegram_habit_start_hour`` to ``telegram_habit_end_hour``
-    (inclusive, default 8 to 22). Reads habits from today's Daily Note via
-    :func:`bt_tasks.get_daily_recurring_tasks` and skips entirely when the
-    list is empty.
-    """
-    if not config.get("telegram_habit_reminders_enabled", True):
-        logger.info("Telegram habit reminders disabled")
-        return
-
-    start_hour = int(config.get("telegram_habit_start_hour", 8))
-    end_hour = int(config.get("telegram_habit_end_hour", 22))
-    logger.info(
-        "Telegram habit reminder loop started (%02d:00 to %02d:00)",
-        start_hour, end_hour,
-    )
-
-    while True:
-        try:
-            now = datetime.now()
-            next_hour = (now + timedelta(hours=1)).replace(
-                minute=0, second=0, microsecond=0,
-            )
-            await asyncio.sleep(max(1.0, (next_hour - now).total_seconds()))
-
-            hour = datetime.now().hour
-            if hour < start_hour or hour > end_hour:
-                continue
-
-            daily_notes_dir = config.get(
-                "obsidian_daily_notes_dir", bt_tasks.DEFAULT_DAILY_NOTES_DIR,
-            )
-            outstanding = bt_tasks.get_daily_recurring_tasks(daily_notes_dir)
-            if not outstanding:
-                logger.info("No outstanding habits — skipping telegram reminder")
-                continue
-
-            all_habits = bt_tasks.get_all_habits(daily_notes_dir)
-            total = len(all_habits)
-            done_count = sum(1 for _, done in all_habits if done)
-            text = (
-                f"<b>Habits: {done_count}/{total} complete</b>\n"
-                f"Tap to toggle."
-            )
-            keyboard = {
-                "inline_keyboard": [
-                    [{
-                        "text": f"✓ {desc}" if done else desc,
-                        "callback_data": f"habit:{bt_tasks.habit_hash(desc)}",
-                    }]
-                    for desc, done in all_habits
-                ],
-            }
-            await bt_telegram.send_message(text, reply_markup=keyboard)
-            logger.info(
-                "Sent telegram habit reminder: %d/%d complete (%d outstanding)",
-                done_count, total, len(outstanding),
-            )
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logger.exception("Telegram habit reminder loop iteration failed")
-            # Back off briefly so a persistent failure doesn't hot-loop
-            await asyncio.sleep(60)
-
-
-# ---------------------------------------------------------------------------
-# Morning Telegram habit summary
-# ---------------------------------------------------------------------------
-
-def _incomplete_habits_covered(
-    msg: str, incomplete: list[str], min_ratio: float = 0.75,
-) -> bool:
-    """Verify the summary mentions each incomplete habit.
-
-    Uses word-match on tokens >4 chars to be forgiving of minor rephrasing.
-    At least ``min_ratio`` of the habits must be mentioned.
-    """
-    if not incomplete:
-        return True
-    lower = msg.lower()
-    covered = 0
-    for habit in incomplete:
-        words = [w for w in re.findall(r"\w+", habit.lower()) if len(w) > 4]
-        if not words or any(w in lower for w in words):
-            covered += 1
-    return covered / len(incomplete) >= min_ratio
-
-
-def _habit_summary_fallback(
-    total: int, completed: int, incomplete: list[str],
-) -> str:
-    pct = round((completed / total) * 100) if total else 0
-    if completed == total:
-        return (
-            f"Good morning Richard. You completed all {total} of your daily "
-            f"habits yesterday. Fantastic work — keep the streak going."
-        )
-    missed = _join_sentence(incomplete) if incomplete else "none"
-    return (
-        f"Good morning Richard. You completed {completed} of {total} daily "
-        f"habits yesterday ({pct} percent). Habits missed: {missed}."
-    )
-
-
-async def _generate_habit_summary_message(
-    total: int, completed: int, incomplete: list[str],
-    config: dict[str, Any],
-) -> str:
-    """Ollama-generated morning summary, with deterministic fallback."""
-    base_url = config.get("ollama_url", "http://localhost:11434")
-    timeout = config.get("ollama_timeout_seconds", 30)
-    model = config.get("alexa_ollama_model") or config.get("ollama_model", "qwen2.5:1.5b")
-    pct = round((completed / total) * 100) if total else 0
-
-    if completed == total:
-        prompt = (
-            f"Richard completed all {total} of his daily habits yesterday "
-            f"(100 percent). Write a short, celebratory morning message "
-            f"(one sentence). Start with 'Good morning'. Mention he hit "
-            f"all {total} habits. No emoji, hashtags, brackets, or quotation "
-            f"marks. Output only the message."
-        )
-    else:
-        habit_list = "\n".join(f"- {h}" for h in incomplete)
-        prompt = (
-            f"Richard completed {completed} out of {total} daily habits "
-            f"yesterday ({pct} percent). The habits he did NOT complete:\n"
-            f"{habit_list}\n\n"
-            f"Write a short, warm morning summary (1-2 sentences). Start "
-            f"with 'Good morning'. Include the completion count/percentage "
-            f"and name every incomplete habit naturally. Be encouraging "
-            f"but honest. No emoji, hashtags, brackets, or quotation marks. "
-            f"Output only the message."
-        )
-
-    payload: dict[str, Any] = {
-        "model": model,
-        "prompt": prompt,
-        "stream": False,
-        "options": {"num_predict": 220, "temperature": 0.6},
-    }
-
-    try:
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(
-                f"{base_url}/api/generate", json=payload, timeout=timeout,
-            )
-            resp.raise_for_status()
-            msg = resp.json().get("response", "").strip().strip('"').strip("'")
-            if msg and _incomplete_habits_covered(msg, incomplete):
-                return msg
-            logger.warning(
-                "Habit summary dropped habits — using fallback",
-            )
-    except httpx.TimeoutException:
-        logger.warning("Ollama timed out on habit summary")
-    except Exception as e:
-        logger.error("Ollama habit summary error: %s", e)
-
-    return _habit_summary_fallback(total, completed, incomplete)
-
-
-async def run_telegram_habit_summary_loop(config: dict[str, Any]) -> None:
-    """Each morning, send a Telegram summary of yesterday's habit completion.
-
-    Controlled by ``telegram_habit_summary_enabled`` (default true),
-    ``telegram_habit_summary_hour`` (default 7), ``telegram_habit_summary_minute``
-    (default 0). Silently skipped if yesterday's Daily Note doesn't exist
-    or contains no ``#habit`` lines.
-    """
-    if not config.get("telegram_habit_summary_enabled", True):
-        logger.info("Telegram habit summary disabled")
-        return
-
-    hour = int(config.get("telegram_habit_summary_hour", 7))
-    minute = int(config.get("telegram_habit_summary_minute", 0))
-    logger.info(
-        "Telegram habit summary loop started (%02d:%02d daily)",
-        hour, minute,
-    )
-
-    while True:
-        try:
-            now = datetime.now()
-            target = now.replace(
-                hour=hour, minute=minute, second=0, microsecond=0,
-            )
-            if target <= now:
-                target += timedelta(days=1)
-            await asyncio.sleep(max(1.0, (target - now).total_seconds()))
-
-            daily_notes_dir = config.get(
-                "obsidian_daily_notes_dir", bt_tasks.DEFAULT_DAILY_NOTES_DIR,
-            )
-            yesterday = datetime.now().date() - timedelta(days=1)
-            result = bt_tasks.summarize_habits(
-                daily_notes_dir, for_date=yesterday,
-            )
-            if result is None:
-                logger.info(
-                    "No Daily Note for %s — skipping habit summary", yesterday,
-                )
-                continue
-            total, completed, incomplete = result
-            if total == 0:
-                logger.info(
-                    "Daily Note for %s has no habits — skipping summary",
-                    yesterday,
-                )
-                continue
-
-            msg = await _generate_habit_summary_message(
-                total, completed, incomplete, config,
-            )
-            await bt_telegram.send_message(msg)
-            logger.info(
-                "Sent telegram habit summary for %s: %d/%d completed",
-                yesterday, completed, total,
-            )
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logger.exception("Telegram habit summary loop iteration failed")
-            await asyncio.sleep(60)
 
 
 # ---------------------------------------------------------------------------

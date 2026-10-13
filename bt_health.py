@@ -346,7 +346,7 @@ def _state_set(conn: sqlite3.Connection, key: str, value: float) -> None:
 
 def check_obsidian_sync(conn: sqlite3.Connection, config: dict[str, Any], settings: Settings,
                         env: "Environment", now: float) -> Check | None:
-    """Is the Pi still exchanging notes with Obsidian? The Pebble sorter and the habit reminders both depend
+    """Is the Pi still exchanging notes with Obsidian? The Pebble sorter and the due-today task reminders both depend
     on it, and it can stall silently (it did, after a reboot, stuck at "Connecting..."). If the log has not
     said "Fully synced" for ``sync_stale_minutes``, restart the service (with a cooldown and a limit), and say so."""
     if config.get("health_check_sync") is False:
