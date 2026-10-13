@@ -339,5 +339,74 @@ class WebLoginTests(unittest.TestCase):
         self.assertEqual(self.client.get("/login?next=/history").headers["Location"], "/history")
 
 
+class ThrottleByRealAddressTests(WebLoginTests):
+    """Behind the Cloudflare Tunnel every request comes from 127.0.0.1; the visitor's own address is in CF-Connecting-IP."""
+
+    def post(self, password, ip=None, remote="127.0.0.1"):
+        headers = {"CF-Connecting-IP": ip} if ip is not None else {}
+        return self.client.post("/login", data={"password": password}, headers=headers, environ_base={"REMOTE_ADDR": remote})
+
+    def test_each_visitor_has_their_own_allowance(self) -> None:
+        self.protect()
+        for _ in range(5):
+            self.assertEqual(self.post("wrong", "203.0.113.7").status_code, 401)
+        self.assertEqual(self.post(PASSWORD, "203.0.113.7").status_code, 429)                       # that visitor is locked out
+        self.assertEqual(self.post(PASSWORD, "198.51.100.9").status_code, 302)                      # somebody else is not
+
+    def test_without_the_header_everyone_on_this_machine_shares_one_allowance(self) -> None:
+        self.protect()
+        for _ in range(5):
+            self.post("wrong")
+        self.assertEqual(self.post(PASSWORD).status_code, 429)
+
+    def test_the_header_is_ignored_when_the_connection_is_not_from_this_machine(self) -> None:
+        self.protect()
+        for i in range(5):
+            self.assertEqual(self.post("wrong", ip=f"203.0.113.{i}", remote="192.168.1.50").status_code, 401)   # a new "address" each time changes nothing
+        self.assertEqual(self.post(PASSWORD, ip="198.51.100.9", remote="192.168.1.50").status_code, 429)
+
+    def test_a_made_up_header_falls_back_to_the_connection_address(self) -> None:
+        self.protect()
+        for bad in ("not an address", "999.1.1.1", "1.2.3", "'; drop table", "a" * 500):
+            self.assertEqual(self.post("wrong", ip=bad).status_code, 401)
+        self.assertEqual(bt_web.client_address.__name__, "client_address")
+        with bt_web.app.test_request_context("/login", headers={"CF-Connecting-IP": "garbage"}, environ_base={"REMOTE_ADDR": "127.0.0.1"}):
+            self.assertEqual(bt_web.client_address(), "127.0.0.1")
+
+    def test_addresses_are_normalised(self) -> None:
+        with bt_web.app.test_request_context("/login", headers={"CF-Connecting-IP": " 2001:DB8:0:0:0:0:0:1 "}, environ_base={"REMOTE_ADDR": "::1"}):
+            self.assertEqual(bt_web.client_address(), "2001:db8::1")
+        with bt_web.app.test_request_context("/login", environ_base={"REMOTE_ADDR": "192.168.1.50"}):
+            self.assertEqual(bt_web.client_address(), "192.168.1.50")
+
+    def test_the_real_address_is_in_the_warning_log(self) -> None:
+        self.protect()
+        with self.assertLogs("bt_web", level="WARNING") as logs:
+            self.post("wrong", "203.0.113.7")
+        self.assertTrue(any("203.0.113.7" in line for line in logs.output))
+
+
+class BindTests(unittest.TestCase):
+    """The dashboard must not be reachable directly from the home network: remote access is the Cloudflare Tunnel (to localhost)."""
+
+    def serve(self, config):
+        import waitress
+        with mock.patch.object(bt_web, "load_config", return_value=config), mock.patch.object(bt_web.bt_db, "init_db"), \
+                mock.patch.object(bt_web.bt_logging, "setup"), mock.patch.object(waitress, "serve") as serve:
+            bt_web.main()
+        return serve.call_args
+
+    def test_it_listens_on_localhost_only_by_default(self) -> None:
+        call = self.serve({})
+        self.assertEqual((call.kwargs["host"], call.kwargs["port"]), ("127.0.0.1", 8080))
+
+    def test_the_host_and_port_can_be_set_in_the_config(self) -> None:
+        call = self.serve({"web_host": "192.168.1.5", "web_port": 9090})
+        self.assertEqual((call.kwargs["host"], call.kwargs["port"]), ("192.168.1.5", 9090))
+
+    def test_the_source_has_no_wildcard_address(self) -> None:
+        self.assertNotIn("0.0.0.0", Path(bt_web.__file__).read_text())
+
+
 if __name__ == "__main__":
     unittest.main()

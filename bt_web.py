@@ -4,6 +4,7 @@ discovered Bluetooth devices."""
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import logging
 import os
@@ -44,6 +45,7 @@ _cleanup_lock = threading.Lock()
 # ---------------------------------------------------------------------------
 
 AUTH_FILE = bt_auth.AUTH_FILE
+DEFAULT_HOST = "127.0.0.1"      # this machine only: remote access goes through the Cloudflare Tunnel (radar.perfectme.uk, behind Cloudflare Access)
 _SAFE_METHODS = ("GET", "HEAD", "OPTIONS")
 _login_throttle = bt_auth.LoginThrottle()
 _auth_cache: dict[str, Any] = {"mtime": object(), "data": {}}
@@ -119,6 +121,21 @@ def security_headers(response):
     return response
 
 
+def client_address() -> str:
+    """Who is asking: the connecting address, or, for requests that arrive through the Cloudflare Tunnel (which connects from this
+    machine), the visitor's real address from the ``CF-Connecting-IP`` header. The header is only believed when the connection
+    itself is from this machine and the value is a valid IP address, so it cannot be used to dodge the login throttle from outside."""
+    remote = request.remote_addr or "unknown"
+    if remote in ("127.0.0.1", "::1"):
+        forwarded = request.headers.get("CF-Connecting-IP", "").strip()
+        if forwarded:
+            try:
+                return str(ipaddress.ip_address(forwarded))
+            except ValueError:
+                pass
+    return remote
+
+
 @app.route("/login", methods=["GET", "POST"])
 def login():
     target = bt_auth.safe_next(request.values.get("next"))
@@ -126,7 +143,7 @@ def login():
         if logged_in():
             return redirect(target)
         return render_template("login.html", active="", next=target, error=None, configured=auth_enabled())
-    client = request.remote_addr or "unknown"
+    client = client_address()
     if not auth_enabled():
         return render_template("login.html", active="", next=target, error=None, configured=False), 200
     if not _login_throttle.allowed(client):
@@ -644,19 +661,20 @@ def main() -> None:
 
     config = load_config()
     port = config.get("web_port", 8080)
+    host = config.get("web_host", DEFAULT_HOST)
 
     # Ensure DB exists
     bt_db.init_db(get_db_path())
 
-    logger.info("Starting Bluetooth Radar dashboard on port %d", port)
+    logger.info("Starting Bluetooth Radar dashboard on %s port %d", host, port)
     try:
         from waitress import serve
     except ImportError:
         logger.warning("waitress is not installed (sudo apt install python3-waitress); "
                        "using Flask's development server")
-        app.run(host="0.0.0.0", port=port, debug=False)
+        app.run(host=host, port=port, debug=False)
     else:
-        serve(app, host="0.0.0.0", port=port, threads=4, ident="bt-web")
+        serve(app, host=host, port=port, threads=4, ident="bt-web")
 
 
 if __name__ == "__main__":
