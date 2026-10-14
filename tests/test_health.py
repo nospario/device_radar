@@ -135,6 +135,11 @@ class SimpleCheckTests(Db):
         c = bh.check_external_mount("/mnt/x", lambda p: False)
         self.assertEqual((c.status, c.message), (bh.WARN, "not mounted at /mnt/x"))
 
+
+    def test_external_mount_is_not_reported_when_not_needed(self) -> None:
+        self.assertIsNone(bh.check_external_mount("/mnt/x", lambda p: False, required=False))
+        self.assertEqual(bh.check_external_mount("/mnt/x", lambda p: True, required=False).status, bh.OK)
+        self.assertEqual(bh.check_external_mount("/mnt/x", lambda p: False, required=True).status, bh.WARN)
     def test_temperature(self) -> None:
         for milli, status in ((45000, bh.OK), (79900, bh.OK), (80000, bh.WARN), (85000, bh.FAIL)):
             self.assertEqual(bh.check_temperature(lambda m=milli: m, 80, 85).status, status, milli)
@@ -554,6 +559,37 @@ class RunOnceTests(Db):
         keys = {r[0]: r[1] for r in self.conn.execute("SELECT key, status FROM health_results")}
         self.assertEqual(keys["external_mount"], "warn")
         self.assertNotIn("disk:external", keys)
+
+    def test_backups_off_and_no_drive_means_no_drive_warnings(self) -> None:
+        lines, send = self.run_once(config={"backup_enabled": False}, environment=env(ismount=lambda p: False))
+        keys = {r[0] for r in self.conn.execute("SELECT key FROM health_results")}
+        for gone in ("backup", "external_mount", "disk:external"):
+            self.assertNotIn(gone, keys)
+        self.assertEqual(lines, [])
+        send.assert_not_awaited()
+
+    def test_backups_off_but_drive_present_still_reports_the_drive(self) -> None:
+        self.run_once(config={"backup_enabled": False})
+        keys = {r[0]: r[1] for r in self.conn.execute("SELECT key, status FROM health_results")}
+        self.assertEqual(keys["external_mount"], "ok")
+        self.assertIn("disk:external", keys)
+        self.assertNotIn("backup", keys)
+
+    def test_turning_backups_off_clears_the_old_drive_warnings_and_their_alert_state(self) -> None:
+        for _ in range(3):                                     # backups on, drive missing: warnings, confirmed and alerted
+            self.run_once(environment=env(ismount=lambda p: False))
+        old = {r[0] for r in self.conn.execute("SELECT key FROM health_results")}
+        self.assertTrue({"backup", "external_mount"} <= old)
+        self.run_once(config={"backup_enabled": False}, environment=env(ismount=lambda p: False))
+        for table in ("health_results", "health_state"):
+            keys = {r[0] for r in self.conn.execute(f"SELECT key FROM {table}")}
+            self.assertFalse(keys & {"backup", "external_mount", "disk:external"}, table)
+
+    def test_backups_on_and_no_drive_still_warns(self) -> None:
+        for _ in range(3):
+            self.run_once(environment=env(ismount=lambda p: False))
+        keys = {r[0]: r[1] for r in self.conn.execute("SELECT key, status FROM health_results")}
+        self.assertEqual((keys["external_mount"], keys["backup"]), ("warn", "warn"))
 
     def test_removing_the_always_on_flag_removes_its_old_alert_state(self) -> None:
         self.heartbeat(NOW - 10)

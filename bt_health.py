@@ -195,9 +195,13 @@ def check_disk(label: str, key: str, path: str, warn: int, fail: int) -> Check |
     return Check(key, label, status, f"{pct}% full, {free_gb:.0f} GB free")
 
 
-def check_external_mount(path: str, ismount: Callable[[str], bool] = os.path.ismount) -> Check:
+def check_external_mount(path: str, ismount: Callable[[str], bool] = os.path.ismount,
+                         required: bool = True) -> Check | None:
+    """Is the external drive mounted? With ``required`` False (backups are off) a missing drive is nothing to report."""
     if ismount(path):
         return Check("external_mount", "External drive", OK, f"mounted at {path}")
+    if not required:
+        return None
     return Check("external_mount", "External drive", WARN, f"not mounted at {path}")
 
 
@@ -554,9 +558,10 @@ def collect(conn: sqlite3.Connection, config: dict[str, Any], settings: Settings
     disk = check_disk("Disk (SD card)", "disk:root", "/", settings.disk_warn, settings.disk_fail)
     if disk:
         checks.append(disk)
-    mount = check_external_mount(settings.external_path, env.ismount)
-    checks.append(mount)
-    if mount.status == OK:
+    mount = check_external_mount(settings.external_path, env.ismount, required=bt_backup.load_settings(config).enabled)
+    if mount:
+        checks.append(mount)
+    if mount and mount.status == OK:
         ext = check_disk("Disk (external drive)", "disk:external", settings.external_path,
                          settings.disk_warn, settings.disk_fail)
         if ext:
@@ -580,6 +585,20 @@ def collect(conn: sqlite3.Connection, config: dict[str, Any], settings: Settings
     if _due(conn, "database", settings.database_hours, now):
         checks.append(check_database(conn))
     return checks
+
+
+# Checks that can stop being reported on purpose (backups switched off, drive unplugged): once one is no longer
+# produced its old row would sit on the dashboard for ever, so it is forgotten along with its alert state.
+DRIVE_CHECK_KEYS = ("backup", "external_mount", "disk:external")
+
+
+def forget_unreported_drive_checks(conn: sqlite3.Connection, checks: list[Check]) -> None:
+    reported = {chk.key for chk in checks}
+    for key in DRIVE_CHECK_KEYS:
+        if key not in reported:
+            for table in ("health_results", "health_state"):
+                conn.execute(f"DELETE FROM {table} WHERE key = ?", (key,))
+    conn.commit()
 
 
 def prune_removed_devices(conn: sqlite3.Connection) -> None:
@@ -608,7 +627,10 @@ async def run_once(
         conn = bt_db.get_connection(db_path)
         try:
             prune_removed_devices(conn)
-            return process_results(conn, collect(conn, config, settings, env, now), settings, now)
+            checks = collect(conn, config, settings, env, now)
+            lines = process_results(conn, checks, settings, now)
+            forget_unreported_drive_checks(conn, checks)
+            return lines
         finally:
             conn.close()
 
